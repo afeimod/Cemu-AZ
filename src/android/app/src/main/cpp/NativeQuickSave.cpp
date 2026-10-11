@@ -265,7 +265,11 @@ extern "C" [[maybe_unused]] JNIEXPORT jstring JNICALL
 Java_info_cemu_cemu_nativeinterface_NativeQuickSave_getQuickSaveInfo([[maybe_unused]] JNIEnv* env, [[maybe_unused]] jclass clazz)
 {
 	jstring result = nullptr;
-	JNIUtils::HandleNativeException(env, [&]() {
+	// Inlined exception guard (same semantics as JNIUtils::HandleNativeException).
+	// NDK r29 clang 20 mis-compiles consteval format-string checks inside lambdas
+	// passed through function templates, so this function cannot use the helper.
+	try
+	{
 		const TitleId titleId = GetForegroundTitleIdSafe();
 		if (titleId == 0)
 		{
@@ -305,7 +309,17 @@ Java_info_cemu_cemu_nativeinterface_NativeQuickSave_getQuickSaveInfo([[maybe_unu
 			EscapeJsonString(autoBackupTimestamp),
 			autoBackupThumb ? "true" : "false");
 		result = JNIUtils::ToJString(env, json);
-	});
+	}
+	catch (const std::exception& exception)
+	{
+		const jclass exceptionClass = env->FindClass("info/cemu/cemu/nativeinterface/NativeException");
+		env->ThrowNew(exceptionClass, exception.what());
+	}
+	catch (...)
+	{
+		const jclass exceptionClass = env->FindClass("info/cemu/cemu/nativeinterface/NativeException");
+		env->ThrowNew(exceptionClass, "Unknown native exception");
+	}
 	return result;
 }
 
