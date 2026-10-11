@@ -52,6 +52,13 @@ fun parsePoFile(source: InputStream): Map<String, String> {
         }
     }
 
+    // flush the last entry: the parser above only commits on blank lines,
+    // but PO files are not required to end with one - without this the
+    // final translation would silently disappear
+    if (msgId.isNotEmpty() && msg.isNotEmpty()) {
+        strings[msgId] = msg
+    }
+
     return strings
 }
 

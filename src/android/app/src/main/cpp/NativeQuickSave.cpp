@@ -2,7 +2,7 @@
 #include "Image.h"
 #include "JNIUtils.h"
 
-#include <malloc.h>
+#include <dlfcn.h> // dlsym: malloc_trim is resolved at runtime (see TrimHeap below)
 #include "Cafe/CafeSystem.h"
 #include "Cafe/Savestate/SaveState.h"
 #include "Cafe/HW/Latte/Renderer/Renderer.h"
@@ -61,6 +61,19 @@ namespace
 	fs::path GetSlotSaveDir(TitleId titleId, int slot)
 	{
 		return GetSlotDir(titleId, slot) / "save";
+	}
+
+	// Returns free heap pages to the OS to keep the memory footprint low.
+	// bionic only declares malloc_trim() in <malloc.h> when the compile-time
+	// API level is >= 28, but the symbol exists on every device running it,
+	// so we resolve it dynamically instead - this compiles with any minSdk
+	// and is a no-op on the (theoretical) devices lacking the symbol.
+	void TrimHeap()
+	{
+		using MallocTrimFn = int (*)(size_t);
+		static const MallocTrimFn mallocTrimFn = reinterpret_cast<MallocTrimFn>(dlsym(RTLD_DEFAULT, "malloc_trim"));
+		if (mallocTrimFn != nullptr)
+			mallocTrimFn(0);
 	}
 
 	bool CopyDirectory(const fs::path& src, const fs::path& dst)
@@ -429,7 +442,7 @@ Java_info_cemu_cemu_nativeinterface_NativeQuickSave_quickRestoreSlot([[maybe_unu
 			{
 				// return freed heap pages (GPU cache unload, restore scratch data)
 				// back to the OS right away to keep the memory footprint low
-				malloc_trim(0);
+				TrimHeap();
 				result = (jint)NativeQuickSave::QUICKSAVE_OK_RESTORED_IN_PLACE;
 				return;
 			}

@@ -389,7 +389,7 @@ msgid "Enable input overlay"
 msgstr "启用虚拟按键层"
 
 msgid "Enable motion"
-msgstr "启集体感"
+msgstr "启用体感"
 
 msgid "Enable vibrate on touch"
 msgstr "启用触摸振动"
