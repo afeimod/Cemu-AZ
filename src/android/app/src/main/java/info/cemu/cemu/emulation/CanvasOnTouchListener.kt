@@ -5,7 +5,13 @@ import android.view.MotionEvent
 import android.view.View
 import info.cemu.cemu.nativeinterface.NativeInput
 
-class CanvasOnTouchListener(val isTV: Boolean) : View.OnTouchListener {
+class CanvasOnTouchListener(
+    val isTV: Boolean,
+    // optional coordinate scaling: maps raw view-space touch coordinates into
+    // the coordinate space the native side expects (used by the floating GamePad
+    // overlay, whose TextureView is scaled down from its fixed 854x480 buffer)
+    private val scaleProvider: ((View) -> Pair<Float, Float>)? = null,
+) : View.OnTouchListener {
     private var currentPointerId: Int = -1
 
     @SuppressLint("ClickableViewAccessibility")
@@ -15,22 +21,29 @@ class CanvasOnTouchListener(val isTV: Boolean) : View.OnTouchListener {
         if (currentPointerId != -1 && pointerId != currentPointerId) {
             return false
         }
-        val x = event.getX(pointerIndex).toInt()
-        val y = event.getY(pointerIndex).toInt()
+        var x = event.getX(pointerIndex)
+        var y = event.getY(pointerIndex)
+        scaleProvider?.let { scale ->
+            val (scaleX, scaleY) = scale(v)
+            x *= scaleX
+            y *= scaleY
+        }
+        val touchX = x.toInt()
+        val touchY = y.toInt()
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> {
-                NativeInput.onTouchDown(x, y, isTV)
+                NativeInput.onTouchDown(touchX, touchY, isTV)
                 return true
             }
 
             MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP -> {
                 currentPointerId = -1
-                NativeInput.onTouchUp(x, y, isTV)
+                NativeInput.onTouchUp(touchX, touchY, isTV)
                 return true
             }
 
             MotionEvent.ACTION_MOVE -> {
-                NativeInput.onTouchMove(x, y, isTV)
+                NativeInput.onTouchMove(touchX, touchY, isTV)
                 return true
             }
         }
