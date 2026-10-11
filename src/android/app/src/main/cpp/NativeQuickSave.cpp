@@ -274,7 +274,7 @@ Java_info_cemu_cemu_nativeinterface_NativeQuickSave_getQuickSaveInfo([[maybe_unu
 		if (titleId == 0)
 		{
 			result = JNIUtils::ToJString(env, std::string_view(R"({"titleId":"","titleName":"","maxSlots":6,"slots":[]})"));
-			return;
+			return result;
 		}
 
 		std::string json = fmt::format(R"({{"titleId":"{:016x}","titleName":"{}","maxSlots":{},"slots":[)",
@@ -304,7 +304,7 @@ Java_info_cemu_cemu_nativeinterface_NativeQuickSave_getQuickSaveInfo([[maybe_unu
 		const std::string autoBackupTimestamp = autoBackupExists ? ReadSlotInfoFile(autoBackupDir) : std::string();
 		const bool autoBackupThumb = fs::exists(autoBackupDir / "thumb.tga");
 
-		json += fmt::format(R"(],"autoBackup":{{"exists":{},"timestamp":"{}","thumb":{}}}})",
+		json += fmt::format(R"(],"autoBackup":{{"exists":{},"timestamp":"{}","thumb":{}}}}})",
 			autoBackupExists ? "true" : "false",
 			EscapeJsonString(autoBackupTimestamp),
 			autoBackupThumb ? "true" : "false");
