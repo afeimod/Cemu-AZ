@@ -52,59 +52,11 @@ namespace CafeSaveState
 		// memory. Must be called before end().
 		void RequestGpuCacheReset();
 
-		// Savestate support: after restoring, drop all cached GPU data (textures,
-		// vertex/index buffers) so everything is re-uploaded from the restored
-		// memory. Must be called before end().
-		void RequestGpuCacheReset();
-
-		// Savestate support: after restoring, drop all cached GPU data (textures,
-		// vertex/index buffers) so everything is re-uploaded from the restored
-		// memory. Must be called before end().
-		void RequestGpuCacheReset();
-
-		// Savestate support: after restoring, drop all cached GPU data (textures,
-		// vertex/index buffers) so everything is re-uploaded from the restored
-		// memory. Must be called before end().
-		void RequestGpuCacheReset();
-
-		// Savestate support: after restoring, drop all cached GPU data (textures,
-		// vertex/index buffers) so everything is re-uploaded from the restored
-		// memory. Must be called before end().
-		void RequestGpuCacheReset();
-
-		// Savestate support: after restoring, drop all cached GPU data (textures,
-		// vertex/index buffers) so everything is re-uploaded from the restored
-		// memory. Must be called before end().
-		void RequestGpuCacheReset();
-
-		// Savestate support: after restoring, drop all cached GPU data (textures,
-		// vertex/index buffers) so everything is re-uploaded from the restored
-		// memory. Must be called before end().
-		void RequestGpuCacheReset();
-
-		// Savestate support: after restoring, drop all cached GPU data (textures,
-		// vertex/index buffers) so everything is re-uploaded from the restored
-		// memory. Must be called before end().
-		void RequestGpuCacheReset();
-
-		// Savestate support: after restoring, drop all cached GPU data (textures,
-		// vertex/index buffers) so everything is re-uploaded from the restored
-		// memory. Must be called before end().
-		void RequestGpuCacheReset();
-
 	private:
 		bool m_active{ false };
 		bool m_frozenTiming{ false };
 		bool m_pausedByUs{ false };
 		bool m_wasPaused{ false };
-		bool m_resetGpuCaches{ false };
-		bool m_resetGpuCaches{ false };
-		bool m_resetGpuCaches{ false };
-		bool m_resetGpuCaches{ false };
-		bool m_resetGpuCaches{ false };
-		bool m_resetGpuCaches{ false };
-		bool m_resetGpuCaches{ false };
-		bool m_resetGpuCaches{ false };
 		bool m_resetGpuCaches{ false };
 	};
 
