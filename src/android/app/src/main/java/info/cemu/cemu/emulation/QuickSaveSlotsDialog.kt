@@ -109,7 +109,7 @@ private fun SlotCard(
 fun QuickSaveSlotsDialog(
     mode: QuickSaveDialogMode,
     onDismiss: () -> Unit,
-    onRestartGame: () -> Unit,
+    onRelaunchGame: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
     var info by remember { mutableStateOf<NativeQuickSave.QuickSaveInfo?>(null) }
@@ -199,8 +199,12 @@ fun QuickSaveSlotsDialog(
             }
             working = false
             when (result) {
-                // the title has been shut down during the restore attempt, always restart
-                NativeQuickSave.RESULT_OK, NativeQuickSave.RESULT_ERROR_IO -> onRestartGame()
+                // the title has been shut down during the restore, relaunch it inside
+                // the running process without killing the app
+                NativeQuickSave.RESULT_OK, NativeQuickSave.RESULT_ERROR_IO -> {
+                    onRelaunchGame()
+                    onDismiss()
+                }
                 else -> errorMessage = resultToMessage(result)
             }
         }
@@ -264,7 +268,7 @@ fun QuickSaveSlotsDialog(
                 }
                 if (mode == QuickSaveDialogMode.LOAD) {
                     Text(
-                        text = tr("Restoring a save will restart the game."),
+                        text = tr("Restoring will restart the game and load the save data from the selected snapshot."),
                         fontSize = 11.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(top = 4.dp),

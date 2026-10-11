@@ -26,7 +26,7 @@ fun FigureCreateDialog(
         onDismissRequest = onDismiss,
         buttons = {
             Row(modifier = Modifier.align(Alignment.End)) {
-                TextButton(onClick = onDismiss) { Text("Cancel") }
+                TextButton(onClick = onDismiss) { Text(tr("Cancel")) }
                 TextButton(onClick = {
                     onCreate()
                     onDismiss()

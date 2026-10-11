@@ -1125,6 +1125,7 @@ namespace CafeSystem
 		UnmountBaseDirectories();
 		DestroyMemorySpace();
 		LaunchSettings::ClearCosArgstr();
+		sTitlePaused = false;
 		sSystemRunning = false;
 	}
 

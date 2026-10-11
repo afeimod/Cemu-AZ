@@ -76,6 +76,7 @@ import info.cemu.cemu.emulation.inputoverlay.InputOverlaySurfaceView.InputMode.E
 import info.cemu.cemu.emulation.inputoverlay.InputOverlaySurfaceView.InputMode.EDIT_SIZE
 import info.cemu.cemu.nativeinterface.NativeEmulation
 import info.cemu.cemu.nativeinterface.NativeSettings
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
 @Composable
@@ -110,6 +111,27 @@ fun EmulationScreen(
     fun closeDrawer() {
         scope.launch {
             drawerState.close()
+        }
+    }
+
+    // Relaunches the current title inside the running process (no app restart).
+    // Falls back to the process-restart path if preparing the title fails.
+    fun relaunchGameInProcess() {
+        scope.launch {
+            snackbarHostState.showMessage(scope, tr("Restarting game..."))
+        }
+        scope.launch(Dispatchers.IO) {
+            try {
+                val prepareResult = NativeEmulation.prepareTitle(gamePath)
+                if (prepareResult == NativeEmulation.PrepareTitleResult.SUCCESSFUL) {
+                    NativeEmulation.initializeSystems()
+                    NativeEmulation.launchTitle()
+                } else {
+                    restartEmulationActivity(context, gamePath)
+                }
+            } catch (_: Exception) {
+                restartEmulationActivity(context, gamePath)
+            }
         }
     }
 
@@ -264,7 +286,7 @@ fun EmulationScreen(
         QuickSaveSlotsDialog(
             mode = QuickSaveDialogMode.SAVE,
             onDismiss = { showQuickSaveDialog = false },
-            onRestartGame = { restartEmulationActivity(context, gamePath) },
+            onRelaunchGame = { relaunchGameInProcess() },
         )
     }
 
@@ -272,7 +294,7 @@ fun EmulationScreen(
         QuickSaveSlotsDialog(
             mode = QuickSaveDialogMode.LOAD,
             onDismiss = { showQuickLoadDialog = false },
-            onRestartGame = { restartEmulationActivity(context, gamePath) },
+            onRelaunchGame = { relaunchGameInProcess() },
         )
     }
 

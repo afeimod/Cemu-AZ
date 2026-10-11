@@ -3,6 +3,7 @@
 #include "config/ActiveSettings.h"
 #include "config/CemuConfig.h"
 #include "config/NetworkSettings.h"
+#include "Cafe/HW/Latte/Core/LatteTiming.h"
 
 extern "C" [[maybe_unused]] JNIEXPORT jint JNICALL
 Java_info_cemu_cemu_nativeinterface_NativeSettings_getOverlayPosition([[maybe_unused]] JNIEnv* env, [[maybe_unused]] jclass clazz)
@@ -445,4 +446,8 @@ Java_info_cemu_cemu_nativeinterface_NativeSettings_setGameSpeed([[maybe_unused]]
 	if (speedMode < 0 || speedMode > 4)
 		speedMode = 1;
 	ActiveSettings::SetTimerShiftFactor((uint8)(4 - speedMode));
+	// scale the simulated vsync frequency as well, otherwise games that wait for
+	// flip events (GX2WaitSwap / GX2SwapScanBuffers) ignore the timer shift
+	static const int kSpeedMultiplierPercent[5] = { 50, 100, 200, 400, 800 };
+	LatteTiming_setSpeedMultiplier(kSpeedMultiplierPercent[speedMode]);
 }

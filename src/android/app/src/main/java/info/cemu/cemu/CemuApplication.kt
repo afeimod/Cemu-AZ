@@ -3,6 +3,8 @@ package info.cemu.cemu
 import android.app.Application
 import info.cemu.cemu.common.android.context.internalFolder
 import info.cemu.cemu.common.settings.AppSettingsStore
+import info.cemu.cemu.common.ui.localization.DEFAULT_LANGUAGE
+import info.cemu.cemu.common.ui.localization.getAvailableLanguages
 import info.cemu.cemu.common.ui.localization.setLanguage
 import info.cemu.cemu.common.ui.localization.setTranslations
 import info.cemu.cemu.nativeinterface.NativeActiveSettings.initializeActiveSettings
@@ -21,6 +23,7 @@ import java.io.File
 import java.io.IOException
 import java.io.PrintWriter
 import java.io.StringWriter
+import java.util.Locale
 import java.util.regex.Pattern
 
 class CemuApplication : Application() {
@@ -44,7 +47,26 @@ class CemuApplication : Application() {
         setTranslations(this)
 
         val language = runBlocking {
-            AppSettingsStore.dataStore.data.map { it.guiSettings.language }.first()
+            val stored = AppSettingsStore.dataStore.data
+                .map { it.guiSettings.language }
+                .first()
+            if (stored != DEFAULT_LANGUAGE) {
+                stored
+            } else {
+                // first launch: pick the system language automatically when a translation exists
+                val systemLanguage = Locale.getDefault().language
+                if (getAvailableLanguages().any { it.code == systemLanguage }) {
+                    try {
+                        AppSettingsStore.dataStore.updateData {
+                            it.copy(guiSettings = it.guiSettings.copy(language = systemLanguage))
+                        }
+                    } catch (_: Exception) {
+                    }
+                    systemLanguage
+                } else {
+                    stored
+                }
+            }
         }
 
         setLanguage(language, this)

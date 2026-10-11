@@ -4,10 +4,23 @@
 #include "Cafe/HW/Latte/Renderer/Vulkan/VsyncDriver.h"
 #endif
 #include "util/highresolutiontimer/HighResolutionTimer.h"
+#include <atomic>
 #include "config/CemuConfig.h"
 #include "Cafe/CafeSystem.h"
 
 sint32 s_customVsyncFrequency = -1;
+
+// emulation speed multiplier in percent (100 = normal speed, 200 = 2x fast forward, 50 = 0.5x slow motion)
+// scales the simulated vsync frequency so that flip-locked game loops (GX2WaitSwap /
+// GX2SwapScanBuffers) speed up alongside the emulated timer shift
+static std::atomic<sint32> s_speedMultiplierPercent{ 100 };
+
+void LatteTiming_setSpeedMultiplier(sint32 multiplierPercent)
+{
+	if (multiplierPercent < 10)
+		multiplierPercent = 10;
+	s_speedMultiplierPercent = multiplierPercent;
+}
 
 void LatteTiming_NotifyHostVSync();
 
@@ -28,6 +41,12 @@ HRTick LatteTime_CalculateTimeBetweenVSync()
 		tick *= 1000ull;
 		tick /= 1002ull;
 		tick /= 60ull;
+	}
+	const sint32 speedMultiplier = s_speedMultiplierPercent.load(std::memory_order_relaxed);
+	if (speedMultiplier != 100)
+	{
+		tick *= 100ull;
+		tick /= (uint64)speedMultiplier;
 	}
 	return tick;
 }
