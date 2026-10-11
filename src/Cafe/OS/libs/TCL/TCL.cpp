@@ -3,6 +3,9 @@
 
 #include "HW/Latte/Core/LattePM4.h"
 
+#include <chrono>
+#include <thread>
+
 namespace TCL
 {
 	SysAllocator<coreinit::OSEvent> s_updateRetirementEvent;

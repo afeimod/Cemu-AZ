@@ -168,16 +168,6 @@ namespace iosu
 			return fsc_open(translatedPath.c_str(), accessFlags, &fscStatus);
 		}
 
-		struct FSAFileStateEntry
-		{
-			std::string path;
-			uint64 seek{ 0 };
-			uint64 fileSize{ 0 };
-			bool writable{ false };
-			std::vector<uint8> content;
-			bool contentCaptured{ false };
-		};
-
 		class _FSAHandleTable {
 			struct _FSAHandleResource
 			{
