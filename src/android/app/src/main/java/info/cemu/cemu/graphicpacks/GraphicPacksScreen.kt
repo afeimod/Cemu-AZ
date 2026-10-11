@@ -111,6 +111,7 @@ fun GraphicPacksScreen(
                         showGraphicPackSearch = true
                     },
                     onDownloadClicked = { graphicPacksViewModel.downloadNewUpdate(context) },
+                    onInstallBundledClicked = { graphicPacksViewModel.installBundledPacks(context) },
                     installedOnlyChecked = installedOnly,
                     installedOnlyValueChange = graphicPacksViewModel::setInstalledOnly,
                 )
@@ -225,6 +226,7 @@ private fun GraphicPacksRootSectionActions(
     showMainActions: Boolean,
     onSearchClicked: () -> Unit,
     onDownloadClicked: () -> Unit,
+    onInstallBundledClicked: () -> Unit,
     installedOnlyChecked: Boolean,
     installedOnlyValueChange: (Boolean) -> Unit,
 ) {
@@ -259,6 +261,15 @@ private fun GraphicPacksRootSectionActions(
         expanded = showMoreOptions,
         onDismissRequest = { showMoreOptions = false }
     ) {
+        DropdownMenuItem(
+            onClick = {
+                showMoreOptions = false
+                onInstallBundledClicked()
+            },
+            text = {
+                Text(tr("Install bundled packs (offline)"))
+            }
+        )
         DropdownMenuItem(
             onClick = {
                 installedOnlyValueChange(!installedOnlyChecked)

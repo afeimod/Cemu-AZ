@@ -33,6 +33,7 @@ namespace CafeSystem
 
 	void PauseTitle();
 	void ResumeTitle();
+	bool IsTitlePaused();
 
 	bool GetOverrideArgStr(std::vector<std::string>& args);
 	void SetOverrideArgs(std::span<std::string> args);

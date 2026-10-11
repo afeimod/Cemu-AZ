@@ -238,6 +238,40 @@ class GraphicPacksViewModel(
         }
     }
 
+    fun installBundledPacks(context: Context) {
+        val graphicPacksRootDir = context.getExternalFilesDir(null)
+
+        if (graphicPacksRootDir == null) {
+            _downloadStatus.value = GraphicPacksDownloadStatus.ERROR
+            return
+        }
+
+        val oldDownloadJob = downloadJob
+
+        downloadJob = viewModelScope.launch {
+            oldDownloadJob?.cancelAndJoin()
+
+            graphicPacksDownloader.installBundled(graphicPacksRootDir) {
+                try {
+                    context.assets.open("bundled_graphic_packs.zip")
+                } catch (_: Exception) {
+                    null
+                }
+            }.catch {
+                when (it) {
+                    is CancellationException -> _downloadStatus.value = null
+                    else -> _downloadStatus.value = GraphicPacksDownloadStatus.ERROR
+                }
+            }.collect {
+                _downloadStatus.value = it
+
+                if (it == GraphicPacksDownloadStatus.FINISHED_DOWNLOADING) {
+                    refreshGraphicPacks()
+                }
+            }
+        }
+    }
+
     private val _filterText = MutableStateFlow("")
     val filterText: StateFlow<String> = _filterText
     fun setFilterText(filterText: String) {

@@ -1,5 +1,6 @@
 #include "JNIUtils.h"
 #include "audio/IAudioAPI.h"
+#include "config/ActiveSettings.h"
 #include "config/CemuConfig.h"
 #include "config/NetworkSettings.h"
 
@@ -425,4 +426,23 @@ extern "C" [[maybe_unused]] JNIEXPORT void JNICALL
 Java_info_cemu_cemu_nativeinterface_NativeSettings_saveSettings([[maybe_unused]] JNIEnv* env, [[maybe_unused]] jclass clazz)
 {
 	GetConfigHandle().Save();
+}
+
+// Game speed (emulated timer speed). Speed modes are indexed 0..4 and map to
+// 0.5x, 1x, 2x, 4x, 8x via the internal right-shift factor (multiplier = 8 >> shift).
+extern "C" [[maybe_unused]] JNIEXPORT jint JNICALL
+Java_info_cemu_cemu_nativeinterface_NativeSettings_getGameSpeed([[maybe_unused]] JNIEnv* env, [[maybe_unused]] jclass clazz)
+{
+	const uint8 shiftFactor = ActiveSettings::GetTimerShiftFactor();
+	if (shiftFactor <= 4)
+		return 4 - shiftFactor; // shift 4 -> mode 0 (0.5x), shift 0 -> mode 4 (8x)
+	return 1; // out of range values fall back to 1x
+}
+
+extern "C" [[maybe_unused]] JNIEXPORT void JNICALL
+Java_info_cemu_cemu_nativeinterface_NativeSettings_setGameSpeed([[maybe_unused]] JNIEnv* env, [[maybe_unused]] jclass clazz, jint speedMode)
+{
+	if (speedMode < 0 || speedMode > 4)
+		speedMode = 1;
+	ActiveSettings::SetTimerShiftFactor((uint8)(4 - speedMode));
 }

@@ -47,6 +47,12 @@ class GraphicPacksDownloader(private val client: HttpClient = HttpClient()) {
         ignoreUnknownKeys = true
     }
 
+    companion object {
+        // Version of the graphic packs zip bundled in the APK assets
+        const val BUNDLED_VERSION = "Github987"
+        private const val RELEASES_ATOM_URL = "https://github.com/cemu-project/cemu_graphic_packs/releases.atom"
+    }
+
     private fun getCurrentVersion(graphicPacksDir: File): String? {
         val graphicPacksVersionFile =
             graphicPacksDir.toPath() / "downloadedGraphicPacks" / "version.txt"
@@ -73,6 +79,12 @@ class GraphicPacksDownloader(private val client: HttpClient = HttpClient()) {
     }
 
     private suspend fun fetchLatestRelease(): Release? {
+        // primary path: cemu.info api2 -> GitHub API, then fall back to the
+        // releases atom feed when the GitHub API is rate limited or unreachable
+        return fetchLatestReleaseFromApi() ?: fetchLatestReleaseFromAtom()
+    }
+
+    private suspend fun fetchLatestReleaseFromApi(): Release? {
         val response = client.get(getUpdateUrl())
 
         if (!response.status.isSuccess()) {
@@ -81,6 +93,33 @@ class GraphicPacksDownloader(private val client: HttpClient = HttpClient()) {
 
         return try {
             json.decodeFromString<Release>(response.body())
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    // The GitHub REST API is heavily rate limited on shared IP addresses. The
+    // releases atom feed is served without those limits and exposes the latest
+    // release tag, from which the asset URL can be constructed.
+    private suspend fun fetchLatestReleaseFromAtom(): Release? {
+        return try {
+            val response = client.get(RELEASES_ATOM_URL)
+
+            if (!response.status.isSuccess()) {
+                return null
+            }
+
+            val body = response.body<String>()
+            val versionRegex = Regex("Github(\\d+)")
+            val latestVersion = versionRegex.findAll(body).firstOrNull()?.groupValues?.get(1)
+                ?: return null
+
+            Release(
+                name = "Github$latestVersion",
+                assets = listOf(
+                    Asset(browserDownloadUrl = "https://github.com/cemu-project/cemu_graphic_packs/releases/download/Github$latestVersion/graphicPacks$latestVersion.zip")
+                )
+            )
         } catch (_: Exception) {
             null
         }
@@ -153,6 +192,27 @@ class GraphicPacksDownloader(private val client: HttpClient = HttpClient()) {
         emit(GraphicPacksDownloadStatus.EXTRACTING)
 
         extractAndInstall(zipBytes, graphicPacksDir, version)
+
+        emit(GraphicPacksDownloadStatus.FINISHED_DOWNLOADING)
+    }
+
+    // Installs the graphic packs zip bundled in the APK assets. Works fully offline
+    // and includes the official 60FPS patches for many games.
+    fun installBundled(graphicPacksRootDir: File, assetStreamProvider: () -> java.io.InputStream?): Flow<GraphicPacksDownloadStatus> = flow {
+        emit(GraphicPacksDownloadStatus.EXTRACTING)
+
+        val zipBytes = withContext(Dispatchers.IO) {
+            try {
+                assetStreamProvider()?.use { it.readBytes() }
+            } catch (_: Exception) {
+                null
+            }
+        } ?: run {
+            emit(GraphicPacksDownloadStatus.ERROR)
+            return@flow
+        }
+
+        extractAndInstall(zipBytes, graphicPacksRootDir.resolve("graphicPacks"), BUNDLED_VERSION)
 
         emit(GraphicPacksDownloadStatus.FINISHED_DOWNLOADING)
     }

@@ -4,6 +4,13 @@ object NativeSettings {
     @JvmStatic
     external fun saveSettings()
 
+    // Game speed modes: 0 = 0.5x, 1 = 1x, 2 = 2x, 3 = 4x, 4 = 8x
+    @JvmStatic
+    external fun getGameSpeed(): Int
+
+    @JvmStatic
+    external fun setGameSpeed(speedMode: Int)
+
     @JvmStatic
     external fun addGamesPath(uri: String?)
 

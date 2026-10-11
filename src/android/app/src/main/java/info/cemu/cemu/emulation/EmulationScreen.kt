@@ -1,6 +1,8 @@
 package info.cemu.cemu.emulation
 
 import android.annotation.SuppressLint
+import android.content.Context
+import android.content.Intent
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import androidx.activity.compose.BackHandler
@@ -18,6 +20,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.layout.wrapContentSize
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -26,6 +29,7 @@ import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.SnackbarHost
@@ -39,6 +43,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -47,6 +52,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.LayoutDirection
@@ -68,6 +75,7 @@ import info.cemu.cemu.emulation.inputoverlay.InputOverlaySurfaceView.InputMode.D
 import info.cemu.cemu.emulation.inputoverlay.InputOverlaySurfaceView.InputMode.EDIT_POSITION
 import info.cemu.cemu.emulation.inputoverlay.InputOverlaySurfaceView.InputMode.EDIT_SIZE
 import info.cemu.cemu.nativeinterface.NativeEmulation
+import info.cemu.cemu.nativeinterface.NativeSettings
 import kotlinx.coroutines.launch
 
 @Composable
@@ -84,9 +92,12 @@ fun EmulationScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
     var showQuitConfirmationDialog by remember { mutableStateOf(false) }
     var inputOverlayInputMode by rememberSaveable { mutableStateOf(DEFAULT) }
     var showEmulatedUSBDevices by remember { mutableStateOf(false) }
+    var showQuickSaveDialog by remember { mutableStateOf(false) }
+    var showQuickLoadDialog by remember { mutableStateOf(false) }
 
     val emulationError by viewModel.emulationError.collectAsState()
     val isEmulationInitialized by viewModel.isEmulationInitialized.collectAsState()
@@ -172,6 +183,14 @@ fun EmulationScreen(
                             showEmulatedUSBDevices = true
                             closeDrawer()
                         },
+                        onQuickSave = {
+                            showQuickSaveDialog = true
+                            closeDrawer()
+                        },
+                        onQuickLoad = {
+                            showQuickLoadDialog = true
+                            closeDrawer()
+                        },
                     )
                 }
             }
@@ -241,7 +260,32 @@ fun EmulationScreen(
         )
     }
 
+    if (showQuickSaveDialog) {
+        QuickSaveSlotsDialog(
+            mode = QuickSaveDialogMode.SAVE,
+            onDismiss = { showQuickSaveDialog = false },
+            onRestartGame = { restartEmulationActivity(context, gamePath) },
+        )
+    }
+
+    if (showQuickLoadDialog) {
+        QuickSaveSlotsDialog(
+            mode = QuickSaveDialogMode.LOAD,
+            onDismiss = { showQuickLoadDialog = false },
+            onRestartGame = { restartEmulationActivity(context, gamePath) },
+        )
+    }
+
     EmulationTextInputDialog()
+}
+
+private fun restartEmulationActivity(context: Context, gamePath: String) {
+    val intent = Intent(context, EmulationActivity::class.java).apply {
+        putExtra(EmulationActivity.EXTRA_LAUNCH_PATH, gamePath)
+        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+    }
+    context.startActivity(intent)
+    Runtime.getRuntime().exit(0)
 }
 
 @Composable
@@ -289,8 +333,38 @@ private fun EmulationSideMenuContent(
     onShowEmulatedUSBDevices: () -> Unit,
     onEditInputOverlay: () -> Unit,
     onResetInputOverlay: () -> Unit,
+    onQuickSave: () -> Unit,
+    onQuickLoad: () -> Unit,
     onQuit: () -> Unit,
 ) {
+    var isTitlePaused by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) { isTitlePaused = NativeEmulation.isTitlePaused() }
+
+    TextButtonItem(
+        label = tr(if (isTitlePaused) "Resume emulation" else "Pause emulation"),
+        onClick = {
+            if (isTitlePaused) {
+                NativeEmulation.resumeTitle()
+                isTitlePaused = false
+            } else {
+                NativeEmulation.pauseTitle()
+                isTitlePaused = true
+            }
+        },
+    )
+
+    TextButtonItem(
+        label = tr("Quick save"),
+        onClick = onQuickSave,
+    )
+
+    TextButtonItem(
+        label = tr("Quick load"),
+        onClick = onQuickLoad,
+    )
+
+    GameSpeedItem()
+
     CheckboxItem(
         label = tr("Enable motion"),
         checked = sideMenuState.isMotionEnabled,
@@ -336,6 +410,39 @@ private fun EmulationSideMenuContent(
         label = tr("Exit"),
         onClick = onQuit,
     )
+}
+
+@Composable
+private fun GameSpeedItem() {
+    var gameSpeed by remember { mutableIntStateOf(1) }
+    LaunchedEffect(Unit) { gameSpeed = NativeSettings.getGameSpeed() }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(8.dp),
+    ) {
+        Text(
+            text = tr("Game speed"),
+            fontSize = 16.sp,
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            listOf("0.5x" to 0, "1x" to 1, "2x" to 2, "4x" to 3, "8x" to 4).forEach { (label, mode) ->
+                Text(
+                    text = label,
+                    fontSize = 14.sp,
+                    color = if (gameSpeed == mode) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable {
+                            gameSpeed = mode
+                            NativeSettings.setGameSpeed(mode)
+                        }
+                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                )
+            }
+        }
+    }
 }
 
 @Composable

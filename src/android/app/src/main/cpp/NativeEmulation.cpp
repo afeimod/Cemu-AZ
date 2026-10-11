@@ -401,3 +401,15 @@ Java_info_cemu_cemu_nativeinterface_NativeEmulation_resumeTitle([[maybe_unused]]
 {
 	CafeSystem::ResumeTitle();
 }
+
+extern "C" [[maybe_unused]] JNIEXPORT jboolean JNICALL
+Java_info_cemu_cemu_nativeinterface_NativeEmulation_isTitlePaused([[maybe_unused]] JNIEnv* env, [[maybe_unused]] jclass clazz)
+{
+	return CafeSystem::IsTitlePaused();
+}
+
+extern "C" [[maybe_unused]] JNIEXPORT void JNICALL
+Java_info_cemu_cemu_nativeinterface_NativeEmulation_shutdownTitle([[maybe_unused]] JNIEnv* env, [[maybe_unused]] jclass clazz)
+{
+	CafeSystem::ShutdownTitle();
+}
