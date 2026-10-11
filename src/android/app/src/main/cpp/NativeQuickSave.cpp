@@ -31,27 +31,6 @@ namespace
 	constexpr int kThumbMaxWidth = 320;
 	constexpr int kThumbMaxHeight = 180;
 
-	// Wraps a JNI function body with an exception guard that propagates errors to Kotlin
-	template<typename TRet, typename TFn>
-	TRet InvokeJNIFunction(JNIEnv* env, TFn fn)
-	{
-		try
-		{
-			return fn();
-		}
-		catch (const std::exception& exception)
-		{
-			const jclass exceptionClass = env->FindClass("info/cemu/cemu/nativeinterface/NativeException");
-			env->ThrowNew(exceptionClass, exception.what());
-		}
-		catch (...)
-		{
-			const jclass exceptionClass = env->FindClass("info/cemu/cemu/nativeinterface/NativeException");
-			env->ThrowNew(exceptionClass, "Unknown native exception");
-		}
-		return TRet{};
-	}
-
 	TitleId GetForegroundTitleIdSafe()
 	{
 		if (!CafeSystem::IsTitleRunning())
@@ -213,10 +192,10 @@ namespace
 		std::vector<uint8> thumbData((size_t)thumbWidth * thumbHeight * 3);
 		for (int y = 0; y < thumbHeight; ++y)
 		{
-			const int srcY = std::min(height - 1, (int)((int64)y * height / thumbHeight));
+			const int srcY = std::min(height - 1, (int)((sint64)y * height / thumbHeight));
 			for (int x = 0; x < thumbWidth; ++x)
 			{
-				const int srcX = std::min(width - 1, (int)((int64)x * width / thumbWidth));
+				const int srcX = std::min(width - 1, (int)((sint64)x * width / thumbWidth));
 				const uint8* src = rgb + ((size_t)srcY * width + srcX) * 3;
 				uint8* dst = thumbData.data() + ((size_t)y * thumbWidth + x) * 3;
 				dst[0] = src[0];
@@ -285,10 +264,14 @@ namespace
 extern "C" [[maybe_unused]] JNIEXPORT jstring JNICALL
 Java_info_cemu_cemu_nativeinterface_NativeQuickSave_getQuickSaveInfo([[maybe_unused]] JNIEnv* env, [[maybe_unused]] jclass clazz)
 {
-	return InvokeJNIFunction<jstring>(env, [&]() -> jstring {
+	jstring result = nullptr;
+	JNIUtils::HandleNativeException(env, [&]() {
 		const TitleId titleId = GetForegroundTitleIdSafe();
 		if (titleId == 0)
-			return JNIUtils::ToJString(env, R"({"titleId":"","titleName":"","maxSlots":6,"slots":[]})");
+		{
+			result = JNIUtils::ToJString(env, std::string_view(R"({"titleId":"","titleName":"","maxSlots":6,"slots":[]})"));
+			return;
+		}
 
 		std::string json = fmt::format(R"({{"titleId":"{:016x}","titleName":"{}","maxSlots":{},"slots":[)",
 			(uint64)titleId,
@@ -321,28 +304,39 @@ Java_info_cemu_cemu_nativeinterface_NativeQuickSave_getQuickSaveInfo([[maybe_unu
 			autoBackupExists ? "true" : "false",
 			EscapeJsonString(autoBackupTimestamp),
 			autoBackupThumb ? "true" : "false");
-		return JNIUtils::ToJString(env, json);
+		result = JNIUtils::ToJString(env, json);
 	});
+	return result;
 }
 
 extern "C" [[maybe_unused]] JNIEXPORT jint JNICALL
 Java_info_cemu_cemu_nativeinterface_NativeQuickSave_quickSaveSlot([[maybe_unused]] JNIEnv* env, [[maybe_unused]] jclass clazz, jint slot)
 {
-	return InvokeJNIFunction<jint>(env, [&]() -> jint {
+	jint result = 0;
+	JNIUtils::HandleNativeException(env, [&]() {
 		if (!CafeSystem::IsTitleRunning())
-			return (jint)NativeQuickSave::QUICKSAVE_ERROR_NOT_RUNNING;
+		{
+			result = (jint)NativeQuickSave::QUICKSAVE_ERROR_NOT_RUNNING;
+			return;
+		}
 
 		const TitleId titleId = CafeSystem::GetForegroundTitleId();
 		const fs::path saveDir = GetTitleSaveDir(titleId);
 		std::error_code existsEc;
 		if (!fs::exists(saveDir, existsEc))
-			return (jint)NativeQuickSave::QUICKSAVE_ERROR_NO_SAVE_DATA;
+		{
+			result = (jint)NativeQuickSave::QUICKSAVE_ERROR_NO_SAVE_DATA;
+			return;
+		}
 
 		const fs::path slotDir = GetSlotDir(titleId, slot);
 		std::error_code ec;
 		fs::create_directories(slotDir, ec);
 		if (ec)
-			return (jint)NativeQuickSave::QUICKSAVE_ERROR_IO;
+		{
+			result = (jint)NativeQuickSave::QUICKSAVE_ERROR_IO;
+			return;
+		}
 
 		const bool wasPaused = CafeSystem::IsTitlePaused();
 
@@ -364,22 +358,30 @@ Java_info_cemu_cemu_nativeinterface_NativeQuickSave_quickSaveSlot([[maybe_unused
 		if (!wasPaused)
 			CafeSystem::ResumeTitle();
 
-		return (jint)(copyOk ? NativeQuickSave::QUICKSAVE_OK : NativeQuickSave::QUICKSAVE_ERROR_IO);
+		result = (jint)(copyOk ? NativeQuickSave::QUICKSAVE_OK : NativeQuickSave::QUICKSAVE_ERROR_IO);
 	});
+	return result;
 }
 
 extern "C" [[maybe_unused]] JNIEXPORT jint JNICALL
 Java_info_cemu_cemu_nativeinterface_NativeQuickSave_quickRestoreSlot([[maybe_unused]] JNIEnv* env, [[maybe_unused]] jclass clazz, jint slot)
 {
-	return InvokeJNIFunction<jint>(env, [&]() -> jint {
+	jint result = 0;
+	JNIUtils::HandleNativeException(env, [&]() {
 		if (!CafeSystem::IsTitleRunning())
-			return (jint)NativeQuickSave::QUICKSAVE_ERROR_NOT_RUNNING;
+		{
+			result = (jint)NativeQuickSave::QUICKSAVE_ERROR_NOT_RUNNING;
+			return;
+		}
 
 		const TitleId titleId = CafeSystem::GetForegroundTitleId();
 		const fs::path slotSaveDir = GetSlotSaveDir(titleId, slot);
 		std::error_code existsEc;
 		if (!fs::exists(slotSaveDir, existsEc))
-			return (jint)NativeQuickSave::QUICKSAVE_ERROR_SLOT_EMPTY;
+		{
+			result = (jint)NativeQuickSave::QUICKSAVE_ERROR_SLOT_EMPTY;
+			return;
+		}
 
 		// Shut down the running title first so the game releases all save file handles
 		// and no writes can corrupt the restored data
@@ -400,36 +402,41 @@ Java_info_cemu_cemu_nativeinterface_NativeQuickSave_quickRestoreSlot([[maybe_unu
 		// Restore the selected slot into the MLC save directory
 		fs::remove_all(saveDir, ec);
 		if (!CopyDirectory(slotSaveDir, saveDir))
-			return (jint)NativeQuickSave::QUICKSAVE_ERROR_IO;
+		{
+			result = (jint)NativeQuickSave::QUICKSAVE_ERROR_IO;
+			return;
+		}
 
-		return (jint)NativeQuickSave::QUICKSAVE_OK;
+		result = (jint)NativeQuickSave::QUICKSAVE_OK;
 	});
+	return result;
 }
 
 extern "C" [[maybe_unused]] JNIEXPORT jobject JNICALL
 Java_info_cemu_cemu_nativeinterface_NativeQuickSave_getQuickSaveThumbnail([[maybe_unused]] JNIEnv* env, [[maybe_unused]] jclass clazz, jint slot)
 {
-	return InvokeJNIFunction<jobject>(env, [&]() -> jobject {
+	jobject result = nullptr;
+	JNIUtils::HandleNativeException(env, [&]() {
 		const TitleId titleId = GetForegroundTitleIdSafe();
 		if (titleId == 0)
-			return (jobject) nullptr;
+			return;
 
 		const fs::path thumbPath = GetSlotDir(titleId, slot) / "thumb.tga";
 		std::error_code ec;
 		if (!fs::exists(thumbPath, ec))
-			return (jobject) nullptr;
+			return;
 
 		std::ifstream file(thumbPath, std::ios::binary);
 		if (!file)
-			return (jobject) nullptr;
+			return;
 
 		std::vector<uint8> fileData((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
 		if (fileData.empty())
-			return (jobject) nullptr;
+			return;
 
 		Image image(fileData);
 		if (!image.IsOk())
-			return (jobject) nullptr;
+			return;
 
 		const jclass bitmapClass = env->FindClass("android/graphics/Bitmap");
 		const jmethodID createBitmapMID = env->GetStaticMethodID(bitmapClass, "createBitmap", "([IIILandroid/graphics/Bitmap$Config;)Landroid/graphics/Bitmap;");
@@ -445,6 +452,7 @@ Java_info_cemu_cemu_nativeinterface_NativeQuickSave_getQuickSaveThumbnail([[mayb
 		env->DeleteLocalRef(bitmapConfig);
 		env->DeleteLocalRef(bitmapConfigClass);
 		env->DeleteLocalRef(bitmapClass);
-		return bitmap;
+		result = bitmap;
 	});
+	return result;
 }
