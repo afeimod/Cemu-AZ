@@ -293,6 +293,7 @@ namespace snd_core
 	sint16* AIGetCurrentDMABuffer(uint32 device);
 
 	void AXOut_SubmitTVFrame(sint32 frameIndex);
+	void AXOut_ResetAfterRestore();
 	void AXOut_SubmitDRCFrame(sint32 frameIndex);
 
 	sint32 AXGetDeviceMode(sint32 device);

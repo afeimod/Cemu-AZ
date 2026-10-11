@@ -1,6 +1,8 @@
 #include "NativeQuickSave.h"
 #include "Image.h"
 #include "JNIUtils.h"
+
+#include <malloc.h>
 #include "Cafe/CafeSystem.h"
 #include "Cafe/Savestate/SaveState.h"
 #include "Cafe/HW/Latte/Renderer/Renderer.h"
@@ -425,6 +427,9 @@ Java_info_cemu_cemu_nativeinterface_NativeQuickSave_quickRestoreSlot([[maybe_unu
 			const auto restoreResult = CafeSaveState::RestoreStateFromFile((uint64)titleId, statePath);
 			if (restoreResult.success)
 			{
+				// return freed heap pages (GPU cache unload, restore scratch data)
+				// back to the OS right away to keep the memory footprint low
+				malloc_trim(0);
 				result = (jint)NativeQuickSave::QUICKSAVE_OK_RESTORED_IN_PLACE;
 				return;
 			}

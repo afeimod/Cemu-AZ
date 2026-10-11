@@ -13,8 +13,17 @@ import java.io.OutputStream
 
 @Serializable
 data class EmulationSettings(
-    val gamePadPosition: GamePadPosition = GamePadPosition.RIGHT,
+    val gamePadPosition: GamePadPosition = GamePadPosition.OVERLAY,
     val gameSpeedMode: Int = 1,
+    // floating GamePad screen overlay (shown when gamePadPosition == OVERLAY)
+    // padOverlayScale: pad screen width as fraction of the main screen width
+    // padOverlayOpacity: 0..100
+    // padOverlayBlur: blur radius in dp (0 = disabled, requires Android 12+)
+    // padOverlayCorner: 0 = bottom-left, 1 = bottom-right, 2 = top-left, 3 = top-right
+    val padOverlayScale: Float = 0.2f,
+    val padOverlayOpacity: Int = 60,
+    val padOverlayBlur: Int = 0,
+    val padOverlayCorner: Int = 0,
 )
 
 @Serializable
@@ -33,7 +42,8 @@ data class InputOverlayRect(
 @Serializable
 data class InputOverlaySettings(
     val isVibrateOnTouchEnabled: Boolean = false,
-    val isOverlayEnabled: Boolean = false,
+    // virtual buttons are enabled out of the box (overlay controller 1)
+    val isOverlayEnabled: Boolean = true,
     val controllerIndex: Int = 0,
     val alpha: Int = 64,
     val inputVisibilityMap: Map<OverlayInputConfig, Boolean> = emptyMap(),

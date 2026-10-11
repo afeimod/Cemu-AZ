@@ -6,6 +6,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
@@ -26,10 +27,24 @@ private fun Modifier.iconBorder(borderColor: Color) =
 fun GameIcon(
     game: NativeGameTitles.Game,
     modifier: Modifier,
+    coverVersion: Int = 0,
 ) {
     val borderColor = MaterialTheme.colorScheme.onSurface
 
-    if (game.icon != null) {
+    // custom cover images set by the user take precedence over the low-res
+    // title icon; coverVersion is bumped whenever a cover is imported/removed
+    // so all icons re-compose with fresh data
+    val customCover = remember(game.titleId, coverVersion) {
+        GameCoverStore.loadCover(game.titleId)
+    }
+
+    if (customCover != null) {
+        Image(
+            modifier = modifier.iconBorder(borderColor),
+            bitmap = customCover,
+            contentDescription = null
+        )
+    } else if (game.icon != null) {
         Image(
             modifier = modifier.iconBorder(borderColor),
             bitmap = game.icon!!,

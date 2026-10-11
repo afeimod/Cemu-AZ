@@ -16,6 +16,8 @@ import info.cemu.cemu.common.either.bind
 import info.cemu.cemu.common.either.mapError
 import info.cemu.cemu.common.settings.AppSettings
 import info.cemu.cemu.common.settings.AppSettingsStore
+import info.cemu.cemu.common.settings.EmulationSettings
+import info.cemu.cemu.common.settings.GamePadPosition
 import info.cemu.cemu.common.settings.InputOverlayRect
 import info.cemu.cemu.common.settings.InputOverlaySettings
 import info.cemu.cemu.common.settings.OverlayInputConfig
@@ -90,7 +92,15 @@ class EmulationViewModel(
     init {
         viewModelScope.launch {
             val settings = dataStore.data.first()
-            _sideMenuState.update { it.copy(isInputOverlayVisible = settings.inputOverlaySettings.isOverlayEnabled) }
+            _sideMenuState.update {
+                it.copy(
+                    // in the default overlay layout the floating GamePad screen is
+                    // shown out of the box; the side-by-side layouts keep the old
+                    // hidden-by-default behavior
+                    isPadVisible = settings.emulationSettings.gamePadPosition == GamePadPosition.OVERLAY,
+                    isInputOverlayVisible = settings.inputOverlaySettings.isOverlayEnabled,
+                )
+            }
         }
     }
 
@@ -132,6 +142,19 @@ class EmulationViewModel(
             SharingStarted.WhileSubscribed(5000),
             null,
         )
+
+    val emulationSettings = dataStore.data.map { it.emulationSettings }
+        .stateIn(
+            viewModelScope,
+            SharingStarted.WhileSubscribed(5000),
+            null,
+        )
+
+    fun updateEmulationSettings(transform: (EmulationSettings) -> EmulationSettings) {
+        viewModelScope.launch {
+            dataStore.updateData { it.copy(emulationSettings = transform(it.emulationSettings)) }
+        }
+    }
 
     val destroyedSurfaces = ConditionFlags()
     var setSurfaces = ConditionFlags()

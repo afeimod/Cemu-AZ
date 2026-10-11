@@ -3,17 +3,20 @@ package info.cemu.cemu.emulation
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
+import android.os.Build
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
@@ -52,7 +55,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.res.painterResource
@@ -64,8 +69,10 @@ import androidx.lifecycle.viewmodel.MutableCreationExtras
 import androidx.lifecycle.viewmodel.compose.viewModel
 import info.cemu.cemu.R
 import info.cemu.cemu.common.settings.AppSettingsStore
+import info.cemu.cemu.common.settings.EmulationSettings
 import info.cemu.cemu.common.settings.GamePadPosition
 import info.cemu.cemu.common.settings.HotkeyAction
+import info.cemu.cemu.common.ui.components.Slider
 import info.cemu.cemu.common.ui.extensions.showMessage
 import info.cemu.cemu.common.ui.localization.tr
 import info.cemu.cemu.emulation.emulatedusbdevices.EmulatedUSBDevicesDialog
@@ -77,6 +84,7 @@ import info.cemu.cemu.emulation.inputoverlay.InputOverlaySurfaceView.InputMode.E
 import info.cemu.cemu.emulation.inputoverlay.InputOverlaySurfaceView.InputMode.EDIT_SIZE
 import info.cemu.cemu.nativeinterface.NativeEmulation
 import info.cemu.cemu.nativeinterface.NativeSettings
+import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -101,11 +109,13 @@ fun EmulationScreen(
     var showEmulatedUSBDevices by remember { mutableStateOf(false) }
     var showQuickSaveDialog by remember { mutableStateOf(false) }
     var showQuickLoadDialog by remember { mutableStateOf(false) }
+    var showCheatsDialog by remember { mutableStateOf(false) }
 
     val emulationError by viewModel.emulationError.collectAsState()
     val isEmulationInitialized by viewModel.isEmulationInitialized.collectAsState()
     val sideMenuState by viewModel.sideMenuState.collectAsState()
     val gamePadPosition by viewModel.gamePadPosition.collectAsState()
+    val emulationSettings by viewModel.emulationSettings.collectAsState()
     val isInputOverlayVisible by viewModel.isInputOverlayVisible.collectAsState()
     val inputOverlaySettings by viewModel.inputOverlaySettings.collectAsState()
 
@@ -222,6 +232,12 @@ fun EmulationScreen(
                             showQuickLoadDialog = true
                             closeDrawer()
                         },
+                        onShowCheats = {
+                            showCheatsDialog = true
+                            closeDrawer()
+                        },
+                        emulationSettings = emulationSettings,
+                        onUpdateEmulationSettings = viewModel::updateEmulationSettings,
                     )
                 }
             }
@@ -230,6 +246,7 @@ fun EmulationScreen(
         EmulationSurfaces(
             sideMenuState = sideMenuState,
             gamePadPosition = gamePadPosition,
+            emulationSettings = emulationSettings,
             mainHolderCallback = viewModel.mainHolderCallback,
             padHolderCallback = viewModel.padHolderCallback,
             onInitializeEmulation = viewModel::initializeEmulation,
@@ -307,6 +324,12 @@ fun EmulationScreen(
         )
     }
 
+    if (showCheatsDialog) {
+        CheatsDialog(
+            onDismiss = { showCheatsDialog = false },
+        )
+    }
+
     EmulationTextInputDialog()
 }
 
@@ -366,6 +389,9 @@ private fun EmulationSideMenuContent(
     onResetInputOverlay: () -> Unit,
     onQuickSave: () -> Unit,
     onQuickLoad: () -> Unit,
+    onShowCheats: () -> Unit,
+    emulationSettings: EmulationSettings?,
+    onUpdateEmulationSettings: ((EmulationSettings) -> EmulationSettings) -> Unit,
     onQuit: () -> Unit,
 ) {
     var isTitlePaused by remember { mutableStateOf(false) }
@@ -392,6 +418,11 @@ private fun EmulationSideMenuContent(
     TextButtonItem(
         label = tr("Quick load"),
         onClick = onQuickLoad,
+    )
+
+    TextButtonItem(
+        label = tr("Cheats"),
+        onClick = onShowCheats,
     )
 
     GameSpeedItem()
@@ -424,6 +455,13 @@ private fun EmulationSideMenuContent(
         checked = sideMenuState.isInputOverlayVisible,
         onCheckedChange = { updateState(sideMenuState.copy(isInputOverlayVisible = it)) },
     )
+
+    if (emulationSettings != null && emulationSettings.gamePadPosition.isOverlay()) {
+        PadOverlaySettingsSection(
+            emulationSettings = emulationSettings,
+            onUpdateEmulationSettings = onUpdateEmulationSettings,
+        )
+    }
 
     TextButtonItem(
         label = tr("Edit inputs"),
@@ -542,6 +580,7 @@ private fun TextButtonItem(
 private fun EmulationSurfaces(
     sideMenuState: SideMenuState,
     gamePadPosition: GamePadPosition?,
+    emulationSettings: EmulationSettings?,
     mainHolderCallback: SurfaceHolder.Callback,
     padHolderCallback: SurfaceHolder.Callback,
     onInitializeEmulation: () -> Unit
@@ -550,8 +589,6 @@ private fun EmulationSurfaces(
         return
     }
 
-    val isVertical = gamePadPosition.isVertical()
-    val appearsAfterTV = gamePadPosition.appearsAfterTV()
     val isPadVisible = sideMenuState.isPadVisible
 
     @Composable
@@ -575,6 +612,23 @@ private fun EmulationSurfaces(
         }
     }
 
+    if (gamePadPosition.isOverlay()) {
+        // floating GamePad screen in a corner of the unchanged, full-size TV screen
+        Box(modifier = Modifier.fillMaxSize()) {
+            MainSurface(Modifier.fillMaxSize())
+            if (isPadVisible && emulationSettings != null) {
+                PadOverlaySurface(
+                    settings = emulationSettings,
+                    padHolderCallback = padHolderCallback,
+                )
+            }
+        }
+        return
+    }
+
+    val isVertical = gamePadPosition.isVertical()
+    val appearsAfterTV = gamePadPosition.appearsAfterTV()
+
     @Composable
     fun SurfacesInOrder(itemModifier: Modifier) {
         if (appearsAfterTV) {
@@ -588,6 +642,123 @@ private fun EmulationSurfaces(
 
     LinearLayout(isVertical) { itemModifier ->
         SurfacesInOrder(itemModifier)
+    }
+}
+
+@Composable
+private fun PadOverlaySurface(
+    settings: EmulationSettings,
+    padHolderCallback: SurfaceHolder.Callback,
+) {
+    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+        val scale = settings.padOverlayScale.coerceIn(0.1f, 0.6f)
+        val padWidth = maxWidth * scale
+        // Wii U GamePad display is 854x480 (16:9)
+        val padHeight = padWidth * (480f / 854f)
+        val corner = settings.padOverlayCorner.coerceIn(0, 3)
+        var padModifier = when (corner) {
+            1 -> Modifier.align(Alignment.BottomEnd)
+            2 -> Modifier.align(Alignment.TopStart)
+            3 -> Modifier.align(Alignment.TopEnd)
+            else -> Modifier.align(Alignment.BottomStart) // default: bottom-left corner
+        }
+            .padding(8.dp)
+            .width(padWidth)
+            .height(padHeight)
+
+        if (settings.padOverlayOpacity in 1..99) {
+            padModifier = padModifier.graphicsLayer {
+                alpha = settings.padOverlayOpacity.coerceIn(1, 100) / 100f
+            }
+        }
+        if (settings.padOverlayBlur > 0 && Build.VERSION.SDK_INT >= 31) {
+            padModifier = padModifier.blur(settings.padOverlayBlur.coerceIn(1, 24).dp)
+        }
+
+        EmulationSurface(
+            modifier = padModifier,
+            isTV = false,
+            holderCallback = padHolderCallback,
+        )
+    }
+}
+
+@Composable
+private fun PadOverlaySettingsSection(
+    emulationSettings: EmulationSettings,
+    onUpdateEmulationSettings: ((EmulationSettings) -> EmulationSettings) -> Unit,
+) {
+    Column {
+        TextButtonItem(
+            label = tr("Floating GamePad screen"),
+            enabled = false,
+            onClick = {},
+        )
+
+        Slider(
+            label = tr("PAD screen size"),
+            value = (emulationSettings.padOverlayScale * 100f).roundToInt().coerceIn(10, 60),
+            valueFrom = 10,
+            valueTo = 60,
+            labelFormatter = { "$it%" },
+            onValueChange = { percent ->
+                onUpdateEmulationSettings { it.copy(padOverlayScale = percent / 100f) }
+            },
+        )
+
+        Slider(
+            label = tr("PAD screen opacity"),
+            value = emulationSettings.padOverlayOpacity.coerceIn(20, 100),
+            valueFrom = 20,
+            valueTo = 100,
+            labelFormatter = { "$it%" },
+            onValueChange = { percent ->
+                onUpdateEmulationSettings { it.copy(padOverlayOpacity = percent) }
+            },
+        )
+
+        Slider(
+            label = tr("PAD screen blur"),
+            value = emulationSettings.padOverlayBlur.coerceIn(0, 24),
+            valueFrom = 0,
+            valueTo = 24,
+            labelFormatter = { if (it == 0) tr("Off") else "$it dp" },
+            onValueChange = { blur ->
+                onUpdateEmulationSettings { it.copy(padOverlayBlur = blur) }
+            },
+        )
+
+        Text(
+            text = tr("PAD screen corner"),
+            fontSize = 16.sp,
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            listOf(
+                0 to tr("Bottom left"),
+                1 to tr("Bottom right"),
+                2 to tr("Top left"),
+                3 to tr("Top right"),
+            ).forEach { (cornerId, label) ->
+                Text(
+                    text = label,
+                    fontSize = 13.sp,
+                    color = if (emulationSettings.padOverlayCorner.coerceIn(0, 3) == cornerId)
+                        MaterialTheme.colorScheme.primary
+                    else
+                        MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable {
+                            onUpdateEmulationSettings { it.copy(padOverlayCorner = cornerId) }
+                        }
+                        .padding(horizontal = 8.dp, vertical = 6.dp),
+                )
+            }
+        }
     }
 }
 

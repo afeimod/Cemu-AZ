@@ -72,6 +72,7 @@ fun GeneralSettingsScreen(
 }
 
 private fun gamePadPositionToString(position: GamePadPosition) = when (position) {
+    GamePadPosition.OVERLAY -> tr("Floating overlay")
     GamePadPosition.ABOVE -> tr("Above")
     GamePadPosition.BELOW -> tr("Below")
     GamePadPosition.LEFT -> tr("Left")

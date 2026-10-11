@@ -62,6 +62,8 @@ public:
 	virtual bool FeedBlock(sint16* data) = 0;
 	virtual bool Play() = 0;
 	virtual bool Stop() = 0;
+	// drops all queued (not yet played) sample blocks - used by savestate restore
+	virtual void Flush() {}
 	void SetAudioDelayOverride(uint32 delay);
 	uint32 GetAudioDelay() const;
 	static void SetAudioDelay(uint32 audioDelay);

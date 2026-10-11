@@ -14,6 +14,7 @@
 #include "Cafe/OS/libs/coreinit/coreinit_Alarm.h"
 #include "Cafe/OS/libs/snd_core/ax.h"
 #include "Cafe/OS/libs/gx2/GX2_Event.h"
+#include "Cafe/Cheats/CheatManager.h"
 
 #include <chrono>
 #include <ctime>
@@ -583,6 +584,15 @@ namespace CafeSaveState
 				// JIT-compiled fragments (self-modifying code), so drop everything
 				PPCRecompiler_invalidateRange(0x00010000, 0x10000000);
 				PPCRecompiler_invalidateRange(0xF6000000, 0xF8000000);
+
+				// the host audio output must be reset after an in-place restore:
+				// stale queued blocks, partially accumulated DMA groups and a
+				// desynced frame gate would otherwise cause probabilistic silence
+				snd_core::AXOut_ResetAfterRestore();
+
+				// cheat patches live in emulated memory and were just overwritten
+				// by the snapshot - re-apply all enabled cheats
+				Cheats::CheatManager::GetInstance().ReapplyAll();
 
 				LogInfo(fmt::format("Restored state for {:016x} ({} ranges, {} file handles)",
 						expectedTitleId, pendingRanges.size(), fileStates.size()));

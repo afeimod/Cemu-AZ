@@ -6,12 +6,17 @@ package info.cemu.cemu.games.list
 
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.provider.DocumentsContract
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -41,6 +46,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -63,6 +69,7 @@ import info.cemu.cemu.R
 import info.cemu.cemu.common.ui.components.FilledSearchToolbar
 import info.cemu.cemu.common.ui.extensions.showMessage
 import info.cemu.cemu.common.ui.localization.tr
+import info.cemu.cemu.games.GameCoverStore
 import info.cemu.cemu.games.GameIcon
 import info.cemu.cemu.nativeinterface.NativeActiveSettings
 import info.cemu.cemu.nativeinterface.NativeGameTitles
@@ -207,17 +214,39 @@ private fun GameList(
     createShortcut: (Game) -> Unit,
     deleteShaderCaches: (Game) -> Unit,
 ) {
+    val context = LocalContext.current
+    var coverVersion by remember { mutableIntStateOf(0) }
+
     LazyVerticalGrid(
         modifier = Modifier
             .padding(8.dp)
             .fillMaxSize(),
-        columns = GridCells.Adaptive(620.dp),
+        columns = GridCells.Adaptive(110.dp),
     ) {
         items(items = games, key = { it.path }) { game ->
             var showDeleteShaderConfirmationDialog by remember { mutableStateOf(false) }
+            var showCoverPicker by remember { mutableStateOf(false) }
+
+            val coverPicker = rememberLauncherForActivityResult(
+                contract = ActivityResultContracts.GetContent(),
+            ) { uri: Uri? ->
+                if (uri != null) {
+                    GameCoverStore.importCover(context, uri, game.titleId)
+                    coverVersion++
+                }
+            }
+
+            LaunchedEffect(showCoverPicker) {
+                if (showCoverPicker) {
+                    coverPicker.launch("image/*")
+                    showCoverPicker = false
+                }
+            }
+
             GameListItem(
                 modifier = Modifier.animateItem(),
                 game = game,
+                coverVersion = coverVersion,
                 onStartGame = startGame,
                 onIsFavoriteChanged = { isFavorite ->
                     setFavorite(game, isFavorite)
@@ -231,6 +260,11 @@ private fun GameList(
                 },
                 onCreateShortcut = {
                     createShortcut(game)
+                },
+                onImportCover = { showCoverPicker = true },
+                onRemoveCover = {
+                    GameCoverStore.removeCover(game.titleId)
+                    coverVersion++
                 },
             )
 
@@ -271,12 +305,17 @@ private fun GameListItem(
     onRemoveShaderCaches: () -> Unit,
     onAboutTitle: () -> Unit,
     onCreateShortcut: () -> Unit,
+    onImportCover: () -> Unit,
+    onRemoveCover: () -> Unit,
     game: Game,
+    coverVersion: Int = 0,
     modifier: Modifier = Modifier,
 ) {
     var contextMenuExpanded by rememberSaveable { mutableStateOf(false) }
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
+    val hasCustomCover = remember(coverVersion, game.titleId) { GameCoverStore.hasCover(game.titleId) }
+
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
         modifier = modifier
             .combinedClickable(
                 onClick = { onStartGame(game) },
@@ -284,19 +323,21 @@ private fun GameListItem(
                     contextMenuExpanded = true
                 },
             )
-            .padding(8.dp)
-            .fillMaxWidth(),
+            .padding(6.dp),
     ) {
         Box {
             GameIcon(
                 game = game,
-                modifier = Modifier.size(60.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .aspectRatio(0.72f),
+                coverVersion = coverVersion,
             )
             if (game.isFavorite) {
                 Icon(
                     modifier = Modifier
                         .align(Alignment.TopEnd)
-                        .padding(2.dp)
+                        .padding(4.dp)
                         .size(24.dp)
                         .clip(CircleShape)
                         .background(MaterialTheme.colorScheme.surfaceVariant),
@@ -307,10 +348,12 @@ private fun GameListItem(
             }
         }
         Text(
-            modifier = Modifier.padding(horizontal = 8.dp),
+            modifier = Modifier.padding(top = 6.dp, start = 2.dp, end = 2.dp),
             text = game.name ?: "",
-            fontSize = 24.sp,
-            maxLines = 1,
+            fontSize = 14.sp,
+            lineHeight = 17.sp,
+            maxLines = 2,
+            minLines = if (hasCustomCover) 2 else 1,
             overflow = TextOverflow.Ellipsis,
         )
         GameContextMenu(
@@ -322,6 +365,9 @@ private fun GameListItem(
             onRemoveShaderCaches = onRemoveShaderCaches,
             onAboutTitle = onAboutTitle,
             onCreateShortcut = onCreateShortcut,
+            onImportCover = onImportCover,
+            onRemoveCover = onRemoveCover,
+            hasCustomCover = hasCustomCover,
         )
     }
 }
@@ -335,6 +381,9 @@ private fun GameContextMenu(
     onRemoveShaderCaches: () -> Unit,
     onAboutTitle: () -> Unit,
     onCreateShortcut: () -> Unit,
+    onImportCover: () -> Unit,
+    onRemoveCover: () -> Unit,
+    hasCustomCover: Boolean,
     game: Game,
 ) {
     @Composable
@@ -364,6 +413,15 @@ private fun GameContextMenu(
             onClick = { onIsFavoriteChanged(!game.isFavorite) },
             text = tr("Favorite"),
             trailingIcon = { Checkbox(checked = game.isFavorite, onCheckedChange = null) },
+        )
+        GameContextMenuItem(
+            onClick = onImportCover,
+            text = tr("Custom cover"),
+        )
+        GameContextMenuItem(
+            enabled = hasCustomCover,
+            onClick = onRemoveCover,
+            text = tr("Remove custom cover"),
         )
         GameContextMenuItem(
             onClick = onEditGameProfile,

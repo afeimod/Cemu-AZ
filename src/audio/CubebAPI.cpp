@@ -158,6 +158,12 @@ bool CubebAPI::Stop()
 	return false;
 }
 
+void CubebAPI::Flush()
+{
+	std::unique_lock lock(m_mutex);
+	m_buffer.clear();
+}
+
 void CubebAPI::SetVolume(sint32 volume)
 {
 	IAudioAPI::SetVolume(volume);

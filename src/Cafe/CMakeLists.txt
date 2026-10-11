@@ -22,6 +22,8 @@ add_library(CemuCafe
   Filesystem/WUHB/RomFSStructs.h
   Filesystem/WUHB/WUHBReader.cpp
   Filesystem/WUHB/WUHBReader.h
+  Cheats/CheatManager.cpp
+  Cheats/CheatManager.h
   GamePatch.cpp
   GamePatch.h
   GameProfile/GameProfile.cpp

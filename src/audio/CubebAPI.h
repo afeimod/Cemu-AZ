@@ -33,6 +33,7 @@ public:
 	bool FeedBlock(sint16* data) override;
 	bool Play() override;
 	bool Stop() override;
+	void Flush() override;
 	void SetVolume(sint32 volume) override;
 
 	static std::vector<DeviceDescriptionPtr> GetDevices();
