@@ -50,7 +50,7 @@ class CemuApplication : Application() {
             val stored = AppSettingsStore.dataStore.data
                 .map { it.guiSettings.language }
                 .first()
-            if (stored != DEFAULT_LANGUAGE) {
+            if (stored.isNotBlank() && stored != DEFAULT_LANGUAGE) {
                 stored
             } else {
                 // first launch: pick the system language automatically when a translation exists

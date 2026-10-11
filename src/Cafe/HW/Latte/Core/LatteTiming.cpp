@@ -22,6 +22,23 @@ void LatteTiming_setSpeedMultiplier(sint32 multiplierPercent)
 	s_speedMultiplierPercent = multiplierPercent;
 }
 
+// freeze/resume the virtual vsync timing. Used by the savestate system while
+// a snapshot is captured or restored so that no GPU thread writes into
+// emulated memory and no vsync events pile up during the pause
+static std::atomic<bool> s_timingPaused{ false };
+
+void LatteTiming_setPaused(bool paused)
+{
+	if (s_timingPaused == paused)
+		return;
+	s_timingPaused = paused;
+	if (!paused)
+	{
+		// avoid a burst of catch-up vsync events right after resuming
+		LatteGPUState.timer_nextVSync = HighResolutionTimer::now().getTick() + LatteTime_CalculateTimeBetweenVSync();
+	}
+}
+
 void LatteTiming_NotifyHostVSync();
 
 // calculate time between vsync events in timer units
@@ -174,6 +191,8 @@ void LatteTiming_NotifyHostVSync()
 // handle timed vsync event
 void LatteTiming_HandleTimedVsync()
 {
+	if (s_timingPaused.load(std::memory_order_relaxed))
+		return;
 	// simulate VSync
 	uint64 currentTimer = HighResolutionTimer::now().getTick();
 	if( currentTimer >= LatteGPUState.timer_nextVSync )

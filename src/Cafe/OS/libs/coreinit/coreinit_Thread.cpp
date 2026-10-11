@@ -44,6 +44,10 @@ void enableFlushDenormalsToZero()
 
 SlimRWLock srwlock_activeThreadList;
 
+// savestate support: disables the host-side system events processed by the
+// scheduler idle loop while a snapshot is captured or restored
+static bool sSystemEventsPaused = false;
+
 // public list of active threads
 MPTR activeThread[256];
 sint32 activeThreadCount = 0;
@@ -130,6 +134,22 @@ namespace coreinit
 		__OSUnlockScheduler();
 	}
 
+	bool AreAllThreadContextsStored()
+	{
+		for (sint32 i = 0; i < activeThreadCount; i++)
+		{
+			auto thread = reinterpret_cast<OSThread_t*>(memory_getPointerFromVirtualOffset(activeThread[i]));
+			if (thread->state == OSThread_t::THREAD_STATE::STATE_RUNNING)
+				return false;
+		}
+		return true;
+	}
+
+	void SetSystemEventsPaused(bool paused)
+	{
+		sSystemEventsPaused = paused;
+	}
+
 	std::unordered_map<OSThread_t*, OSHostThread*> s_threadToFiber;
 
 	bool __CemuIsMulticoreMode()
@@ -167,6 +187,68 @@ namespace coreinit
 		s_threadToFiber.erase(thread);
 		_deleteQueue = hostThread;
 	}
+
+	void SavestateRebuildSchedulerAfterRestore()
+	{
+		__OSLockScheduler();
+
+		// collect the threads from the restored active thread queue inside emulated memory
+		std::vector<OSThread_t*> restoredThreads;
+		OSThread_t* threadItr = g_activeThreadQueue->head.GetPtr();
+		while (threadItr && restoredThreads.size() < 256)
+		{
+			if (!threadItr->IsValidMagic())
+				break; // corrupted queue, stop here
+			restoredThreads.emplace_back(threadItr);
+			threadItr = threadItr->activeThreadChain.next.GetPtr();
+		}
+
+		// rebuild the host-side active thread list
+		activeThreadCount = 0;
+		for (auto* thread : restoredThreads)
+			activeThread[activeThreadCount++] = memory_getVirtualOffsetFromPointer(thread);
+
+		// drop host fibers of threads that no longer exist after the restore
+		std::vector<OSThread_t*> deadThreads;
+		for (auto& it : s_threadToFiber)
+		{
+			if (std::find(restoredThreads.begin(), restoredThreads.end(), it.first) == restoredThreads.end())
+				deadThreads.emplace_back(it.first);
+		}
+		for (auto* thread : deadThreads)
+		{
+			// the second call flushes the internal deferred delete queue
+			__OSDeleteHostThread(thread);
+			__OSDeleteHostThread(thread);
+		}
+
+		// create host fibers for threads that are missing one (e.g. the thread
+		// existed at snapshot time but exited and its fiber was destroyed since)
+		for (auto* thread : restoredThreads)
+		{
+			if (s_threadToFiber.find(thread) == s_threadToFiber.end())
+				__OSCreateHostThread(thread);
+		}
+
+		// reset the run queues (in emulated memory) and the host-side semaphore
+		// counters, then re-add every thread that is ready to run
+		for (sint32 i = 0; i < PPC_CORE_COUNT; i++)
+		{
+			g_coreRunQueue.GetPtr()[i].head = nullptr;
+			g_coreRunQueue.GetPtr()[i].tail = nullptr;
+			g_coreRunQueueThreadCount[i].reset();
+		}
+		for (auto* thread : restoredThreads)
+		{
+			for (sint32 i = 0; i < PPC_CORE_COUNT; i++)
+				thread->currentRunQueue[i] = nullptr;
+		}
+		for (auto* thread : restoredThreads)
+			__OSAddReadyThreadToRunQueue(thread);
+
+		__OSUnlockScheduler();
+	}
+
 
 
 	// add thread to active queue
@@ -1272,6 +1354,10 @@ namespace coreinit
 
 	void __OSCheckSystemEvents()
 	{
+		// savestate support: do not let host threads mutate emulated memory
+		// while a snapshot is being captured or restored
+		if (sSystemEventsPaused)
+			return;
 		// AX update
 		snd_core::AXOut_update();
 		// alarm update

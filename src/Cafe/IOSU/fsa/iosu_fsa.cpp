@@ -168,16 +168,27 @@ namespace iosu
 			return fsc_open(translatedPath.c_str(), accessFlags, &fscStatus);
 		}
 
+		struct FSAFileStateEntry
+		{
+			std::string path;
+			uint64 seek{ 0 };
+			uint64 fileSize{ 0 };
+			bool writable{ false };
+			std::vector<uint8> content;
+			bool contentCaptured{ false };
+		};
+
 		class _FSAHandleTable {
 			struct _FSAHandleResource
 			{
 				bool isAllocated{false};
 				FSCVirtualFile* fscFile;
 				uint16 handleCheckValue;
+				std::string path; // set for file handles, used by the savestate system
 			};
 
 		public:
-			FSA_RESULT AllocateHandle(FSResHandle& handleOut, FSCVirtualFile* fscFile)
+			FSA_RESULT AllocateHandle(FSResHandle& handleOut, FSCVirtualFile* fscFile, const std::string& path = {})
 			{
 				for (size_t i = 0; i < m_handleTable.size(); i++)
 				{
@@ -189,6 +200,7 @@ namespace iosu
 					it.handleCheckValue = checkValue;
 					it.fscFile = fscFile;
 					it.isAllocated = true;
+					it.path = path;
 					uint32 handleVal = ((uint32)i << 16) | (uint32)checkValue;
 					handleOut = (FSResHandle)handleVal;
 					return FSA_RESULT::OK;
@@ -210,6 +222,7 @@ namespace iosu
 					return FSA_RESULT::INVALID_FILE_HANDLE;
 				it.fscFile = nullptr;
 				it.isAllocated = false;
+				it.path.clear();
 				return FSA_RESULT::OK;
 			}
 
@@ -227,6 +240,83 @@ namespace iosu
 				return it.fscFile;
 			}
 
+			// savestate support: capture seek position and (for writable files) the
+			// full content of every open file so a restore can roll them back
+			void CollectFileStates(std::vector<FSAFileStateEntry>& entries)
+			{
+				for (auto& it : m_handleTable)
+				{
+					if (!it.isAllocated || it.fscFile == nullptr)
+						continue;
+					if (it.fscFile->fscGetType() != FSC_TYPE_FILE)
+						continue;
+					FSAFileStateEntry entry;
+					entry.path = it.path;
+					entry.fileSize = it.fscFile->fscQueryValueU64(FSC_QUERY_SIZE);
+					entry.writable = it.fscFile->fscQueryValueU64(FSC_QUERY_WRITEABLE) != 0;
+					entry.seek = it.fscFile->fscGetSeek();
+					constexpr uint64 kMaxCapturedFileSize = 64ULL * 1024ULL * 1024ULL;
+					if (entry.writable && !entry.path.empty() && entry.fileSize <= kMaxCapturedFileSize)
+					{
+						// snapshot the content of writable files (save files are small)
+						entry.contentCaptured = true;
+						it.fscFile->fscSetSeek(0);
+						entry.content.resize((size_t)entry.fileSize);
+						uint32 bytesRead = 0;
+						while (bytesRead < entry.fileSize)
+						{
+							uint32 r = it.fscFile->fscReadData(entry.content.data() + bytesRead, (uint32)(entry.fileSize - bytesRead));
+							if (r == 0)
+								break;
+							bytesRead += r;
+						}
+						entry.content.resize(bytesRead);
+					}
+					it.fscFile->fscSetSeek(entry.seek);
+					entries.emplace_back(std::move(entry));
+				}
+			}
+
+			// savestate support: roll open files back to their snapshot state by
+			// matching them via the recorded path
+			void RestoreFileStates(const std::vector<FSAFileStateEntry>& entries)
+			{
+				for (auto& it : m_handleTable)
+				{
+					if (!it.isAllocated || it.fscFile == nullptr)
+						continue;
+					if (it.fscFile->fscGetType() != FSC_TYPE_FILE)
+						continue;
+					const FSAFileStateEntry* match = nullptr;
+					for (const auto& entry : entries)
+					{
+						if (!entry.path.empty() && entry.path == it.path)
+						{
+							match = &entry;
+							break;
+						}
+					}
+					if (!match)
+						continue; // opened after the snapshot, leave it alone
+					if (match->writable && match->contentCaptured)
+					{
+						// roll the file content back to the snapshot state
+						it.fscFile->fscSetSeek(0);
+						uint32 bytesWritten = 0;
+						while (bytesWritten < match->content.size())
+						{
+							uint32 w = it.fscFile->fscWriteData((void*)(match->content.data() + bytesWritten), (uint32)(match->content.size() - bytesWritten));
+							if (w == 0)
+								break;
+							bytesWritten += w;
+						}
+						if (it.fscFile->fscQueryValueU64(FSC_QUERY_SIZE) != match->fileSize)
+							it.fscFile->fscSetFileLength(match->fileSize);
+					}
+					it.fscFile->fscSetSeek(match->seek);
+				}
+			}
+
 		private:
 			uint32 m_currentCounter = 1;
 			std::array<_FSAHandleResource, 0x3C0> m_handleTable;
@@ -234,6 +324,17 @@ namespace iosu
 
 		_FSAHandleTable sFileHandleTable;
 		_FSAHandleTable sDirHandleTable;
+
+		// savestate support (exported via iosu_fsa.h)
+		void FSACollectOpenFileStates(std::vector<FSAFileStateEntry>& entries)
+		{
+			sFileHandleTable.CollectFileStates(entries);
+		}
+
+		void FSARestoreFileStates(const std::vector<FSAFileStateEntry>& entries)
+		{
+			sFileHandleTable.RestoreFileStates(entries);
+		}
 
 		FSA_RESULT __FSAOpenFile(FSAClient* client, const char* path, const char* accessModifierStr, sint32* fileHandle)
 		{
@@ -291,7 +392,7 @@ namespace iosu
 			if (isAppend)
 				fsc_setFileSeek(fscFile, fsc_getFileSize(fscFile));
 			FSResHandle fsFileHandle;
-			FSA_RESULT r = sFileHandleTable.AllocateHandle(fsFileHandle, fscFile);
+			FSA_RESULT r = sFileHandleTable.AllocateHandle(fsFileHandle, fscFile, path);
 			if (r != FSA_RESULT::OK)
 			{
 				cemuLog_log(LogType::Force, "Exceeded maximum number of FSA file handles");

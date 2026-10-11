@@ -34,9 +34,13 @@ private class AssetTranslation(locale: Locale, private val assetFile: String) :
             val poFileContent = context.assets.open(assetFile).use { source -> source.readBytes() }
             I18n = Gettext.load(locale, poFileContent.inputStream())
             NativeLocalization.setTranslations(parsePoFile(poFileContent.inputStream()))
-        } catch (_: IOException) {
-            Log.e("CemuTranslations", "failed to load translations from asset: $assetFile")
-            return
+            Log.i("CemuTranslations", "loaded translations from asset: $assetFile")
+        } catch (e: Exception) {
+            // a broken or missing translation file must never crash the app or
+            // leave it in a half-loaded state - fall back to English instead
+            Log.e("CemuTranslations", "failed to load translations from asset: $assetFile", e)
+            I18n = Gettext.Fallback
+            NativeLocalization.setTranslations(emptyMap())
         }
     }
 }
@@ -60,7 +64,13 @@ fun getAvailableLanguages() =
     Translations.map { Language(it.locale.language, it.locale.getDisplayName(it.locale)) }
 
 fun setLanguage(languageCode: String, context: Context) {
-    val translation = Translations.firstOrNull { it.locale.language == languageCode } ?: return
+    if (languageCode.isBlank()) {
+        return
+    }
+    // also match locale variants like "zh-CN" against a "zh" translation
+    val translation = Translations.firstOrNull {
+        it.locale.language == languageCode || languageCode.startsWith("${it.locale.language}-")
+    } ?: return
     translation.load(context)
     CurrentLocale = translation.locale
 }

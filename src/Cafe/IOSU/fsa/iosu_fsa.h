@@ -2,6 +2,9 @@
 #include <IOSU/iosu_ipc_common.h>
 #include "fsa_types.h"
 
+#include <string>
+#include <vector>
+
 namespace iosu
 {
 	namespace fsa
@@ -213,5 +216,23 @@ namespace iosu
 
 		void Initialize();
 		void Shutdown();
+
+		// savestate support: state of a single open file handle
+		struct FSAFileStateEntry
+		{
+			std::string path;
+			uint64 seek{ 0 };
+			uint64 fileSize{ 0 };
+			bool writable{ false };
+			std::vector<uint8> content;
+			bool contentCaptured{ false };
+		};
+
+		// savestate support: capture the state of all files currently opened by the game
+		void FSACollectOpenFileStates(std::vector<FSAFileStateEntry>& entries);
+
+		// savestate support: roll open files back to their snapshot state
+		void FSARestoreFileStates(const std::vector<FSAFileStateEntry>& entries);
+
 	} // namespace fsa
 } // namespace iosu

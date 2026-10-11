@@ -12,6 +12,8 @@ object NativeQuickSave {
     const val RESULT_ERROR_NO_SAVE_DATA: Int = 2
     const val RESULT_ERROR_SLOT_EMPTY: Int = 3
     const val RESULT_ERROR_IO: Int = 4
+    const val RESULT_OK_RESTORED_IN_PLACE: Int = 5
+    const val RESULT_ERROR_STATE_RESTORE_FAILED: Int = 6
 
     @Serializable
     data class QuickSaveSlot(
@@ -19,6 +21,7 @@ object NativeQuickSave {
         @SerialName("exists") val exists: Boolean,
         @SerialName("timestamp") val timestamp: String,
         @SerialName("sizeBytes") val sizeBytes: Long,
+        @SerialName("hasState") val hasState: Boolean = false,
         @SerialName("thumb") val thumb: Boolean,
     )
 

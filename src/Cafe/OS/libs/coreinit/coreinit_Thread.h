@@ -511,6 +511,19 @@ namespace coreinit
 	void SuspendActiveThreads();
 	void ResumeActiveThreads();
 
+	// savestate support: true when every active thread is suspended and has
+	// stored its register context into its OSThread structure
+	bool AreAllThreadContextsStored();
+
+	// savestate support: temporarily stops the host-side system events
+	// (AX/alarm/NFP updates) which are processed by the scheduler idle loop
+	void SetSystemEventsPaused(bool paused);
+
+	// savestate support: rebuilds the host-side scheduler state (active
+	// thread list, host fibers and run queues) from the active thread queue
+	// found in (restored) emulated memory. Requires the title to be paused.
+	void SavestateRebuildSchedulerAfterRestore();
+
 	bool __CemuIsMulticoreMode();
 
 	OSThread_t* OSGetDefaultThread(sint32 coreIndex);

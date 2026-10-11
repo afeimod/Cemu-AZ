@@ -2,6 +2,7 @@
 #include "Image.h"
 #include "JNIUtils.h"
 #include "Cafe/CafeSystem.h"
+#include "Cafe/Savestate/SaveState.h"
 #include "Cafe/HW/Latte/Renderer/Renderer.h"
 #include "Cafe/TitleList/TitleId.h"
 #include "config/ActiveSettings.h"
@@ -285,16 +286,25 @@ Java_info_cemu_cemu_nativeinterface_NativeQuickSave_getQuickSaveInfo([[maybe_unu
 		for (int slot = 1; slot <= kMaxSlots; ++slot)
 		{
 			const fs::path slotDir = GetSlotDir(titleId, slot);
-			const bool exists = fs::exists(slotDir / "save");
+			const fs::path statePath = slotDir / "state.bin";
+			std::error_code ec;
+			const bool hasState = fs::exists(statePath, ec);
+			const bool hasSaveData = fs::exists(slotDir / "save", ec);
+			const bool exists = hasState || hasSaveData;
 			const std::string timestamp = exists ? ReadSlotInfoFile(slotDir) : std::string();
-			const uint64 size = exists ? GetDirectorySize(slotDir / "save") : 0;
+			uint64 size = 0;
+			if (hasState)
+				size += fs::file_size(statePath, ec);
+			if (hasSaveData)
+				size += GetDirectorySize(slotDir / "save");
 			const bool thumb = fs::exists(slotDir / "thumb.tga");
 
-			fmt::format_to(std::back_inserter(json), R"({{"slot":{},"exists":{},"timestamp":"{}","sizeBytes":{},"thumb":{}}}{})",
+			fmt::format_to(std::back_inserter(json), R"({{"slot":{},"exists":{},"timestamp":"{}","sizeBytes":{},"hasState":{},"thumb":{}}}{})",
 				slot,
 				exists ? "true" : "false",
 				EscapeJsonString(timestamp),
 				size,
+				hasState ? "true" : "false",
 				thumb ? "true" : "false",
 				slot < kMaxSlots ? "," : "");
 		}
@@ -335,14 +345,6 @@ Java_info_cemu_cemu_nativeinterface_NativeQuickSave_quickSaveSlot([[maybe_unused
 		}
 
 		const TitleId titleId = CafeSystem::GetForegroundTitleId();
-		const fs::path saveDir = GetTitleSaveDir(titleId);
-		std::error_code existsEc;
-		if (!fs::exists(saveDir, existsEc))
-		{
-			result = (jint)NativeQuickSave::QUICKSAVE_ERROR_NO_SAVE_DATA;
-			return;
-		}
-
 		const fs::path slotDir = GetSlotDir(titleId, slot);
 		std::error_code ec;
 		fs::create_directories(slotDir, ec);
@@ -360,19 +362,42 @@ Java_info_cemu_cemu_nativeinterface_NativeQuickSave_quickSaveSlot([[maybe_unused
 		if (!wasPaused)
 			CaptureScreenshotToThumbnail(slotDir / "thumb.tga");
 
-		if (!wasPaused)
-			CafeSystem::PauseTitle();
+		// capture the full emulation state (all emulated memory incl. thread
+		// contexts + open file handles) while the game is paused. The file is
+		// what makes loading instantaneous: restoring it puts the game back to
+		// exactly this moment without any restart
+		CafeSaveState::EmulationFreeze freeze;
+		std::string freezeError;
+		if (!freeze.begin(freezeError))
+		{
+			result = (jint)NativeQuickSave::QUICKSAVE_ERROR_IO;
+			return;
+		}
 
-		const fs::path slotSaveDir = GetSlotSaveDir(titleId, slot);
-		fs::remove_all(slotSaveDir, ec);
-		const bool copyOk = CopyDirectory(saveDir, slotSaveDir);
+		const fs::path statePath = slotDir / "state.bin";
+		const auto captureResult = CafeSaveState::CaptureStateToFileLocked((uint64)titleId, statePath);
+		if (!captureResult.success)
+		{
+			result = (jint)NativeQuickSave::QUICKSAVE_ERROR_IO;
+			return;
+		}
+
+		// also copy the MLC save data as a fallback so the slot can still be
+		// used (with a game restart) after the emulator has been closed
+		bool copyOk = true;
+		const fs::path saveDir = GetTitleSaveDir(titleId);
+		if (fs::exists(saveDir, ec))
+		{
+			const fs::path slotSaveDir = GetSlotSaveDir(titleId, slot);
+			fs::remove_all(slotSaveDir, ec);
+			copyOk = CopyDirectory(saveDir, slotSaveDir);
+		}
 		if (copyOk)
 			WriteSlotInfoFile(slotDir);
 
-		if (!wasPaused)
-			CafeSystem::ResumeTitle();
-
-		result = (jint)(copyOk ? NativeQuickSave::QUICKSAVE_OK : NativeQuickSave::QUICKSAVE_ERROR_IO);
+		// freeze is released by the destructor, which also resumes the game
+		// unless the user had paused it manually
+		result = (jint)NativeQuickSave::QUICKSAVE_OK;
 	});
 	return result;
 }
@@ -389,6 +414,26 @@ Java_info_cemu_cemu_nativeinterface_NativeQuickSave_quickRestoreSlot([[maybe_unu
 		}
 
 		const TitleId titleId = CafeSystem::GetForegroundTitleId();
+		std::error_code ec;
+
+		// preferred path: restore the captured emulation state in-place. The
+		// game is paused, its memory is overwritten with the snapshot and it
+		// resumes exactly where the snapshot was taken - no restart at all
+		const fs::path statePath = GetSlotDir(titleId, slot) / "state.bin";
+		if (fs::exists(statePath, ec))
+		{
+			const auto restoreResult = CafeSaveState::RestoreStateFromFile((uint64)titleId, statePath);
+			if (restoreResult.success)
+			{
+				result = (jint)NativeQuickSave::QUICKSAVE_OK_RESTORED_IN_PLACE;
+				return;
+			}
+			// do not silently fall back to the destructive legacy path when the
+			// state restore failed - report the failure instead
+			result = (jint)NativeQuickSave::QUICKSAVE_ERROR_STATE_RESTORE_FAILED;
+			return;
+		}
+
 		const fs::path slotSaveDir = GetSlotSaveDir(titleId, slot);
 		std::error_code existsEc;
 		if (!fs::exists(slotSaveDir, existsEc))
@@ -397,12 +442,13 @@ Java_info_cemu_cemu_nativeinterface_NativeQuickSave_quickRestoreSlot([[maybe_unu
 			return;
 		}
 
-		// Shut down the running title first so the game releases all save file handles
-		// and no writes can corrupt the restored data
+		// legacy fallback (slots created by older builds without a state file):
+		// shut down the running title first so the game releases all save file
+		// handles and no writes can corrupt the restored data. The caller is
+		// expected to relaunch the title afterwards
 		CafeSystem::ShutdownTitle();
 
 		const fs::path saveDir = GetTitleSaveDir(titleId);
-		std::error_code ec;
 
 		// Keep a safety copy of the current save progress before overwriting it
 		if (fs::exists(saveDir, ec))

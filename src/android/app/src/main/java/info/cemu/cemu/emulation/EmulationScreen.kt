@@ -63,6 +63,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.viewmodel.MutableCreationExtras
 import androidx.lifecycle.viewmodel.compose.viewModel
 import info.cemu.cemu.R
+import info.cemu.cemu.common.settings.AppSettingsStore
 import info.cemu.cemu.common.settings.GamePadPosition
 import info.cemu.cemu.common.settings.HotkeyAction
 import info.cemu.cemu.common.ui.extensions.showMessage
@@ -77,6 +78,7 @@ import info.cemu.cemu.emulation.inputoverlay.InputOverlaySurfaceView.InputMode.E
 import info.cemu.cemu.nativeinterface.NativeEmulation
 import info.cemu.cemu.nativeinterface.NativeSettings
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 @Composable
@@ -157,6 +159,13 @@ fun EmulationScreen(
 
     LaunchedEffect(drawerState.isClosed) {
         setInputListeningEnabled(drawerState.isClosed)
+    }
+
+    LaunchedEffect(Unit) {
+        // apply the persisted game speed for this session as early as possible
+        // (the side menu only applies it when opened)
+        val storedSpeed = AppSettingsStore.dataStore.data.first().emulationSettings.gameSpeedMode
+        NativeSettings.setGameSpeed(storedSpeed)
     }
 
     LaunchedEffect(Unit) {
@@ -436,8 +445,15 @@ private fun EmulationSideMenuContent(
 
 @Composable
 private fun GameSpeedItem() {
+    val scope = rememberCoroutineScope()
     var gameSpeed by remember { mutableIntStateOf(1) }
-    LaunchedEffect(Unit) { gameSpeed = NativeSettings.getGameSpeed() }
+    LaunchedEffect(Unit) {
+        // restore the persisted speed for this session and push it into the
+        // emulator (the native side does not persist the speed itself)
+        val storedSpeed = AppSettingsStore.dataStore.data.first().emulationSettings.gameSpeedMode
+        NativeSettings.setGameSpeed(storedSpeed)
+        gameSpeed = storedSpeed
+    }
 
     Column(
         modifier = Modifier
@@ -459,6 +475,11 @@ private fun GameSpeedItem() {
                         .clickable {
                             gameSpeed = mode
                             NativeSettings.setGameSpeed(mode)
+                            scope.launch {
+                                AppSettingsStore.dataStore.updateData {
+                                    it.copy(emulationSettings = it.emulationSettings.copy(gameSpeedMode = mode))
+                                }
+                            }
                         }
                         .padding(horizontal = 10.dp, vertical = 6.dp),
                 )

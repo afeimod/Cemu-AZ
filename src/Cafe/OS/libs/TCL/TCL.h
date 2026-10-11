@@ -22,6 +22,13 @@ namespace TCL
 	bool TCLGPUReadRBWord(uint32& cmdWord);
 	void TCLGPUNotifyNewRetirementTimestamp();
 
+	// savestate support: true when the GPU has processed every submitted
+	// command buffer (the retire marker caught up with the submit counter)
+	bool IsGpuIdle();
+
+	// savestate support: waits until the GPU is idle. Returns false on timeout
+	bool WaitForGPUIdle(uint32 timeoutMs);
+
 	COSModule* GetModule();
 }
 ENABLE_BITMASK_OPERATORS(TCL::TCLSubmissionFlag);

@@ -68,6 +68,24 @@ namespace TCL
 	std::atomic<uint32> tclRingBufferA_readIndex{0};
 	std::atomic<uint32> tclRingBufferA_writeIndex{0};
 
+	bool IsGpuIdle()
+	{
+		stdx::atomic_ref<uint64be> retireTimestamp(s_tclStatePPC->gpuRetireMarker);
+		return retireTimestamp.load() >= s_currentRetireMarker;
+	}
+
+	bool WaitForGPUIdle(uint32 timeoutMs)
+	{
+		const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+		while (std::chrono::steady_clock::now() < deadline)
+		{
+			if (IsGpuIdle())
+				return true;
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		}
+		return IsGpuIdle();
+	}
+
 	// GPU code calls this to grab the next command word
 	bool TCLGPUReadRBWord(uint32& cmdWord)
 	{

@@ -163,9 +163,10 @@ fun QuickSaveSlotsDialog(
     LaunchedEffect(Unit) { refreshInfo() }
 
     fun resultToMessage(result: Int): String? = when (result) {
-        NativeQuickSave.RESULT_OK -> null
+        NativeQuickSave.RESULT_OK, NativeQuickSave.RESULT_OK_RESTORED_IN_PLACE -> null
         NativeQuickSave.RESULT_ERROR_NO_SAVE_DATA -> tr("No save data found. Save your progress in the game first.")
         NativeQuickSave.RESULT_ERROR_SLOT_EMPTY -> tr("This slot is empty.")
+        NativeQuickSave.RESULT_ERROR_STATE_RESTORE_FAILED -> tr("Loading the savestate failed. The game is still running.")
         NativeQuickSave.RESULT_ERROR_IO, NativeQuickSave.RESULT_ERROR_NOT_RUNNING -> tr("A file error occurred. Please try again.")
         else -> tr("A file error occurred. Please try again.")
     }
@@ -199,8 +200,14 @@ fun QuickSaveSlotsDialog(
             }
             working = false
             when (result) {
-                // the title has been shut down during the restore, relaunch it inside
-                // the running process without killing the app
+                // the state was restored in-place, the game continues without
+                // any restart
+                NativeQuickSave.RESULT_OK_RESTORED_IN_PLACE -> {
+                    onDismiss()
+                }
+                // the title has been shut down during the legacy save data
+                // restore, relaunch it inside the running process without
+                // killing the app
                 NativeQuickSave.RESULT_OK, NativeQuickSave.RESULT_ERROR_IO -> {
                     onRelaunchGame()
                     onDismiss()
@@ -268,7 +275,7 @@ fun QuickSaveSlotsDialog(
                 }
                 if (mode == QuickSaveDialogMode.LOAD) {
                     Text(
-                        text = tr("Restoring will restart the game and load the save data from the selected snapshot."),
+                        text = tr("Slots with a state file are restored instantly without restarting the game."),
                         fontSize = 11.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(top = 4.dp),
@@ -305,8 +312,11 @@ fun QuickSaveSlotsDialog(
             title = { Text(tr("Restore this save?")) },
             text = {
                 Text(
-                    if (slot.slot == -1) tr("The current save progress will be restored from the auto backup. The game will restart.")
-                    else tr("The current save progress will be replaced with slot {0}. The game will restart.", slot.slot)
+                    when {
+                        slot.hasState -> tr("The game will be restored to the exact state from when this snapshot was taken.")
+                        slot.slot == -1 -> tr("The current save progress will be restored from the auto backup. The game will restart.")
+                        else -> tr("The current save progress will be replaced with slot {0}. The game will restart.", slot.slot)
+                    }
                 )
             },
             confirmButton = {

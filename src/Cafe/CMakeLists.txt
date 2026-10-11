@@ -33,6 +33,8 @@ add_library(CemuCafe
   GraphicPack/GraphicPack2Patches.h
   GraphicPack/GraphicPack2PatchesParser.cpp
   GraphicPack/GraphicPackError.h
+  Savestate/SaveState.cpp
+  Savestate/SaveState.h
   HW/ACR/ACR.cpp
   HW/AI/AI.cpp
   HW/AI/AI.h

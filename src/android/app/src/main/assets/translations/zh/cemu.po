@@ -1229,3 +1229,12 @@ msgstr "显示画面"
 msgid "up"
 msgstr "上"
 
+
+msgid "Loading the savestate failed. The game is still running."
+msgstr "读取即时存档失败，游戏仍在运行。"
+
+msgid "Slots with a state file are restored instantly without restarting the game."
+msgstr "带有状态文件的槽位可立即恢复，无需重启游戏。"
+
+msgid "The game will be restored to the exact state from when this snapshot was taken."
+msgstr "游戏将恢复到此快照创建时的精确状态。"
