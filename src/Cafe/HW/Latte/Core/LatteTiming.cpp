@@ -27,6 +27,10 @@ void LatteTiming_setSpeedMultiplier(sint32 multiplierPercent)
 // emulated memory and no vsync events pile up during the pause
 static std::atomic<bool> s_timingPaused{ false };
 
+// forward declaration - defined below; used by LatteTiming_setPaused to
+// reset the vsync timer right after resuming
+HRTick LatteTime_CalculateTimeBetweenVSync();
+
 void LatteTiming_setPaused(bool paused)
 {
 	if (s_timingPaused == paused)
