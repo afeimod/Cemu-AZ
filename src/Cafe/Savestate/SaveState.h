@@ -42,16 +42,70 @@ namespace CafeSaveState
 
 		// Returns false (with a reason in errorOut) if a stable freeze could not
 		// be reached within the timeout. In that case emulation is unmodified.
-		bool begin(std::string& errorOut);
+		bool begin(std::string& errorOut, bool gpuIdleRequired = true);
 
 		// Unfreezes emulation. Safe to call multiple times.
 		void end();
+
+		// Savestate support: after restoring, drop all cached GPU data (textures,
+		// vertex/index buffers) so everything is re-uploaded from the restored
+		// memory. Must be called before end().
+		void RequestGpuCacheReset();
+
+		// Savestate support: after restoring, drop all cached GPU data (textures,
+		// vertex/index buffers) so everything is re-uploaded from the restored
+		// memory. Must be called before end().
+		void RequestGpuCacheReset();
+
+		// Savestate support: after restoring, drop all cached GPU data (textures,
+		// vertex/index buffers) so everything is re-uploaded from the restored
+		// memory. Must be called before end().
+		void RequestGpuCacheReset();
+
+		// Savestate support: after restoring, drop all cached GPU data (textures,
+		// vertex/index buffers) so everything is re-uploaded from the restored
+		// memory. Must be called before end().
+		void RequestGpuCacheReset();
+
+		// Savestate support: after restoring, drop all cached GPU data (textures,
+		// vertex/index buffers) so everything is re-uploaded from the restored
+		// memory. Must be called before end().
+		void RequestGpuCacheReset();
+
+		// Savestate support: after restoring, drop all cached GPU data (textures,
+		// vertex/index buffers) so everything is re-uploaded from the restored
+		// memory. Must be called before end().
+		void RequestGpuCacheReset();
+
+		// Savestate support: after restoring, drop all cached GPU data (textures,
+		// vertex/index buffers) so everything is re-uploaded from the restored
+		// memory. Must be called before end().
+		void RequestGpuCacheReset();
+
+		// Savestate support: after restoring, drop all cached GPU data (textures,
+		// vertex/index buffers) so everything is re-uploaded from the restored
+		// memory. Must be called before end().
+		void RequestGpuCacheReset();
+
+		// Savestate support: after restoring, drop all cached GPU data (textures,
+		// vertex/index buffers) so everything is re-uploaded from the restored
+		// memory. Must be called before end().
+		void RequestGpuCacheReset();
 
 	private:
 		bool m_active{ false };
 		bool m_frozenTiming{ false };
 		bool m_pausedByUs{ false };
 		bool m_wasPaused{ false };
+		bool m_resetGpuCaches{ false };
+		bool m_resetGpuCaches{ false };
+		bool m_resetGpuCaches{ false };
+		bool m_resetGpuCaches{ false };
+		bool m_resetGpuCaches{ false };
+		bool m_resetGpuCaches{ false };
+		bool m_resetGpuCaches{ false };
+		bool m_resetGpuCaches{ false };
+		bool m_resetGpuCaches{ false };
 	};
 
 	// Captures the current emulation state into a single file (written via a

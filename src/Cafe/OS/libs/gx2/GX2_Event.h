@@ -24,4 +24,9 @@ namespace GX2
 	void __GX2NotifyNewRetirementTimestamp(uint64 tsRetire);
 	void __GX2NotifyEvent(GX2CallbackEventType eventType);
 
+	// savestate support: drops all queued (not yet dispatched) event callbacks.
+	// Callbacks queued after a snapshot was taken belong to the discarded
+	// timeline and must not be delivered after a restore
+	void ResetQueuedEventCallbacks();
+
 }

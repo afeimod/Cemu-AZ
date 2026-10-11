@@ -1,6 +1,9 @@
 #pragma once
 #include "Cafe/OS/libs/coreinit/coreinit_Thread.h"
 
+#include <cstdint>
+#include <vector>
+
 namespace coreinit
 {
 	class OSHostAlarm;
@@ -48,6 +51,13 @@ namespace coreinit
 	void OSAlarm_Shutdown();
 
 	void alarm_update();
+
+	// savestate support: the alarm registry (g_activeAlarms) is host-side
+	// state which is not covered by the memory snapshot. Serialization format:
+	// u32 count, then per alarm: u32 alarmPtr (virtual offset), u64 nextFire,
+	// u64 period
+	void SavestateCaptureAlarms(std::vector<uint8>& out);
+	bool SavestateRestoreAlarms(const uint8*& p, const uint8* end);
 
 	void MapAlarmExports();
 	void InitializeAlarm();

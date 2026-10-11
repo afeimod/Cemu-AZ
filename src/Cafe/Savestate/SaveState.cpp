@@ -11,6 +11,9 @@
 #include "Cafe/HW/Espresso/Recompiler/PPCRecompiler.h"
 #include "Cafe/IOSU/fsa/iosu_fsa.h"
 #include "Cemu/Logging/CemuLogging.h"
+#include "Cafe/OS/libs/coreinit/coreinit_Alarm.h"
+#include "Cafe/OS/libs/snd_core/ax.h"
+#include "Cafe/OS/libs/gx2/GX2_Event.h"
 
 #include <chrono>
 #include <ctime>
@@ -28,7 +31,11 @@ extern MPTR sysAreaAllocatorOffset;
 namespace
 {
 		constexpr uint32 kStateMagic = 0x31475343; // "CSG1"
-		constexpr uint32 kStateVersion = 1;
+// version 2 adds a host-state blob after the FSA file entries (AX voice
+// lists, AX callbacks and the coreinit alarm registry). Version 1 files
+// (without the blob) can still be restored, the host lists are then left
+// as they are
+		constexpr uint32 kStateVersion = 2;
 
 		constexpr uint32 kThreadsIdleTimeoutMs = 2000;
 		constexpr uint32 kGpuIdleTimeoutMs = 2000;
@@ -85,6 +92,38 @@ namespace
 				}
 				return true;
 		}
+		// host-state blob section types
+		constexpr uint32 kHostSectionAx = 1;
+		constexpr uint32 kHostSectionAlarms = 2;
+
+		void AppendU32LE(std::vector<uint8>& out, uint32 v)
+		{
+				out.push_back((uint8)(v));
+				out.push_back((uint8)(v >> 8));
+				out.push_back((uint8)(v >> 16));
+				out.push_back((uint8)(v >> 24));
+		}
+
+		uint32 ReadU32LE(const uint8* data)
+		{
+				return (uint32)data[0] | ((uint32)data[1] << 8) | ((uint32)data[2] << 16) | ((uint32)data[3] << 24);
+		}
+
+		// captures the host-side state (AX voice lists/callbacks, alarm registry)
+		// which is not covered by the emulated memory snapshot
+		void AppendHostStateSections(std::vector<uint8>& blob)
+		{
+				std::vector<uint8> section;
+				snd_core::SavestateCaptureHostState(section);
+				AppendU32LE(blob, kHostSectionAx);
+				AppendU32LE(blob, (uint32)section.size());
+				blob.insert(blob.end(), section.begin(), section.end());
+				section.clear();
+				coreinit::SavestateCaptureAlarms(section);
+				AppendU32LE(blob, kHostSectionAlarms);
+				AppendU32LE(blob, (uint32)section.size());
+				blob.insert(blob.end(), section.begin(), section.end());
+		}
 }
 
 namespace CafeSaveState
@@ -94,7 +133,7 @@ namespace CafeSaveState
 				end();
 		}
 
-		bool EmulationFreeze::begin(std::string& errorOut)
+		bool EmulationFreeze::begin(std::string& errorOut, bool gpuIdleRequired)
 		{
 				if (m_active)
 						return true;
@@ -132,22 +171,42 @@ namespace CafeSaveState
 						return false;
 				}
 
+				// drain the command ring before pausing the vsync timing - a GPU thread
+				// blocked in a flip wait needs the vsync counter to keep advancing
+				if (!TCL::WaitForGPUIdle(kGpuIdleTimeoutMs))
+				{
+								if (gpuIdleRequired)
+								{
+												errorOut = "GPU did not become idle in time";
+												if (m_pausedByUs)
+												{
+																CafeSystem::ResumeTitle();
+																m_pausedByUs = false;
+												}
+												return false;
+								}
+								LogWarning("GPU did not retire all commands within the timeout");
+				}
+
+				// commit all pending GPU work (occlusion queries, texture readbacks)
+				// into emulated memory now that the command ring is drained
+				LatteAsyncCommands_queueSaveStateGpuSync(false);
+				LatteAsyncCommands_waitUntilAllProcessed();
+
 				// stop the virtual vsync timer and the OS system events (AX/alarm/NFP)
 				// so that no host thread mutates emulated memory while we work
 				LatteTiming_setPaused(true);
 				coreinit::SetSystemEventsPaused(true);
 				m_frozenTiming = true;
 
-				// let the GPU drain everything that was submitted before the pause
-				if (!TCL::WaitForGPUIdle(kGpuIdleTimeoutMs))
-						LogWarning("GPU did not retire all commands within the timeout");
-
-				LatteAsyncCommands_waitUntilAllProcessed();
+				// keep the GPU thread parked while the caller overwrites emulated memory
+				// (also stops OSScreen uploads from racing the snapshot)
+				g_savestateFreezeGpuThread.store(true);
 
 				if (!IsAtSafeGpuPoint())
 				{
-						// not fatal: the game will simply redraw the affected surfaces
-						LogWarning("Capture point is not an exact frame boundary");
+								// not fatal: the game will simply redraw the affected surfaces
+								LogWarning("Capture point is not an exact frame boundary");
 				}
 
 				m_active = true;
@@ -156,6 +215,16 @@ namespace CafeSaveState
 
 		void EmulationFreeze::end()
 		{
+				// let the GPU thread continue first so it can process the cache reset
+				g_savestateFreezeGpuThread.store(false);
+				if (m_resetGpuCaches)
+				{
+								m_resetGpuCaches = false;
+								// drop all cached GPU data so everything is re-uploaded from the
+								// restored emulated memory
+								LatteAsyncCommands_queueSaveStateGpuSync(true);
+								LatteAsyncCommands_waitUntilAllProcessed();
+				}
 				if (m_frozenTiming)
 				{
 						coreinit::SetSystemEventsPaused(false);
@@ -168,6 +237,11 @@ namespace CafeSaveState
 						m_pausedByUs = false;
 				}
 				m_active = false;
+		}
+
+		void EmulationFreeze::RequestGpuCacheReset()
+		{
+				m_resetGpuCaches = true;
 		}
 
 		OperationResult CaptureStateToFileLocked(uint64 titleId, const std::filesystem::path& filePath)
@@ -251,12 +325,22 @@ namespace CafeSaveState
 						totalBytes += contentLength;
 				}
 
+				// host-side state (AX voice lists/callbacks, alarm registry) which is
+				// not part of emulated memory
+				std::vector<uint8> hostBlob;
+				AppendHostStateSections(hostBlob);
+				const uint32 hostBlobSize = (uint32)hostBlob.size();
+				out.write((const char*)&hostBlobSize, sizeof(hostBlobSize));
+				if (hostBlobSize > 0)
+								out.write((const char*)hostBlob.data(), (std::streamsize)hostBlob.size());
+				totalBytes += sizeof(hostBlobSize) + hostBlob.size();
+
 				out.close();
 				if (!out)
-				{
-						fs::remove(tmpPath, ec);
-						result.errorMessage = "Failed to flush state file";
-						return result;
+{
+								fs::remove(tmpPath, ec);
+								result.errorMessage = "Failed to flush state file";
+								return result;
 				}
 
 				// move the finished snapshot into place (removes any old state file)
@@ -299,7 +383,7 @@ namespace CafeSaveState
 
 				SaveStateHeader header{};
 				in.read((char*)&header, sizeof(header));
-				if (!in || header.magic != kStateMagic || header.version != kStateVersion)
+				if (!in || header.magic != kStateMagic || (header.version != 1 && header.version != 2))
 				{
 						result.errorMessage = "Not a valid savestate file";
 						return result;
@@ -398,6 +482,41 @@ namespace CafeSaveState
 						fileStates.emplace_back(std::move(entry));
 				}
 
+				// parse the host-state blob (version 2+). this happens before anything
+				// is applied so a truncated file never touches the running emulation
+				std::vector<std::pair<uint32, std::vector<uint8>>> hostSections;
+				if (header.version >= 2)
+				{
+								uint32 hostBlobSize = 0;
+								in.read((char*)&hostBlobSize, sizeof(hostBlobSize));
+								if (!in || hostBlobSize > (4u * 1024u * 1024u))
+								{
+												result.errorMessage = "State file is truncated (host state)";
+												return result;
+								}
+								std::vector<uint8> hostBlob(hostBlobSize);
+								if (hostBlobSize > 0)
+								{
+												in.read((char*)hostBlob.data(), (std::streamsize)hostBlob.size());
+												if (!in)
+												{
+																result.errorMessage = "State file is truncated (host state)";
+																return result;
+												}
+								}
+								size_t blobOffset = 0;
+								while (blobOffset + 8 <= hostBlob.size())
+								{
+												const uint32 sectionType = ReadU32LE(hostBlob.data() + blobOffset);
+												const uint32 sectionSize = ReadU32LE(hostBlob.data() + blobOffset + 4);
+												blobOffset += 8;
+												if (blobOffset + sectionSize > hostBlob.size())
+																break;
+												hostSections.emplace_back(sectionType, std::vector<uint8>(hostBlob.begin() + blobOffset, hostBlob.begin() + blobOffset + sectionSize));
+												blobOffset += sectionSize;
+								}
+				}
+
 				// everything validated - now apply the snapshot (caller holds the freeze)
 
 				for (const PendingRange& pending : pendingRanges)
@@ -424,6 +543,38 @@ namespace CafeSaveState
 				// restore host-side state
 				sysAreaAllocatorOffset = (MPTR)header.sysAreaAllocatorOffset;
 				iosu::fsa::FSARestoreFileStates(fileStates);
+
+				// restore the host-side registries which are not covered by the memory
+				// snapshot (AX voice lists/callbacks, alarm registry)
+				for (const auto& section : hostSections)
+				{
+								const uint8* sectionData = section.second.data();
+								const uint8* sectionEnd = sectionData + section.second.size();
+								if (section.first == kHostSectionAx)
+								{
+												if (!snd_core::SavestateRestoreHostState(sectionData, sectionEnd))
+																LogWarning("AX host state section is invalid");
+								}
+								else if (section.first == kHostSectionAlarms)
+								{
+												if (!coreinit::SavestateRestoreAlarms(sectionData, sectionEnd))
+																LogWarning("Alarm host state section is invalid");
+								}
+				}
+
+				// resync the host-side pending flip counter with the restored emulated
+				// counters, otherwise the GPU keeps executing phantom flips and
+				// GX2WaitSwap never observes request == execute
+				if (LatteGPUState.sharedArea)
+				{
+								const uint32 requestedFlips = _swapEndianU32(LatteGPUState.sharedArea->flipRequestCountBE);
+								const uint32 executedFlips = _swapEndianU32(LatteGPUState.sharedArea->flipExecuteCountBE);
+								LatteGPUState.flipRequestCount.store(requestedFlips > executedFlips ? (uint64)(requestedFlips - executedFlips) : 0ull);
+				}
+
+				// drop GX2 event callbacks which were queued after the snapshot was
+				// taken (they belong to the discarded timeline)
+				GX2::ResetQueuedEventCallbacks();
 
 				// rebuild the host scheduler state from the restored emulated memory
 				coreinit::SavestateRebuildSchedulerAfterRestore();
@@ -459,7 +610,10 @@ namespace CafeSaveState
 				EmulationFreeze freeze;
 				std::string freezeError;
 				if (!freeze.begin(freezeError))
-					return { false, freezeError };
-				return RestoreStateFromFileLocked(expectedTitleId, filePath);
+								return { false, freezeError };
+				auto result = RestoreStateFromFileLocked(expectedTitleId, filePath);
+				if (result.success)
+								freeze.RequestGpuCacheReset();
+				return result;
 		}
 }

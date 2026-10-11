@@ -3,6 +3,8 @@
 #include "Cafe/HW/Latte/Core/LatteShader.h"
 #include "Cafe/HW/Latte/Core/LatteSurfaceCopy.h"
 #include "Cafe/HW/Latte/Core/LatteTexture.h"
+#include "Cafe/HW/Latte/Core/LatteBufferCache.h"
+#include "Cafe/HW/Latte/Core/LatteIndices.h"
 
 void LatteThread_Exit();
 
@@ -43,14 +45,22 @@ typedef struct
 			LatteSurfaceCopyParam dst;
 			LatteSurfaceCopyRect rect;
 		}textureCopy;
+
+		struct
+		{
+			uint32 unloadCaches;
+		}savestateSync;
 	};
 }LatteAsyncCommand_t;
 
 #define ASYNC_CMD_FORCE_TEXTURE_READBACK		1
 #define ASYNC_CMD_DELETE_SHADER					2
 #define ASYNC_CMD_TEXTURE_COPY					3
+#define ASYNC_CMD_SAVESTATE_GPU_SYNC			4
 
 std::queue<LatteAsyncCommand_t> LatteAsyncCommandQueue;
+
+std::atomic<bool> g_savestateFreezeGpuThread{ false };
 
 void LatteAsyncCommands_queueForceTextureReadback(MPTR physAddr, MPTR mipAddr, uint32 swizzle, sint32 format, sint32 width, sint32 height, sint32 depth, uint32 pitch, uint32 slice, sint32 dim, Latte::E_HWTILEMODE tilemode, sint32 aa, sint32 level)
 {
@@ -105,6 +115,16 @@ void LatteAsyncCommand_queueTextureCopy(const LatteSurfaceCopyParam& src, const 
 	swl_gpuAsyncCommands.UnlockWrite();
 }
 
+void LatteAsyncCommands_queueSaveStateGpuSync(bool unloadCaches)
+{
+	LatteAsyncCommand_t asyncCommand = {};
+	asyncCommand.type = ASYNC_CMD_SAVESTATE_GPU_SYNC;
+	asyncCommand.savestateSync.unloadCaches = unloadCaches ? 1 : 0;
+	swl_gpuAsyncCommands.LockWrite();
+	LatteAsyncCommandQueue.push(asyncCommand);
+	swl_gpuAsyncCommands.UnlockWrite();
+}
+
 void LatteAsyncCommands_waitUntilAllProcessed()
 {
 	while (LatteAsyncCommandQueue.empty() == false)
@@ -153,6 +173,18 @@ void LatteAsyncCommands_checkAndExecute()
 		else if (asyncCommand.type == ASYNC_CMD_TEXTURE_COPY)
 		{
 			LatteSurfaceCopy_copySurfaceNew(asyncCommand.textureCopy.src, asyncCommand.textureCopy.dst, asyncCommand.textureCopy.rect);
+		}
+		else if (asyncCommand.type == ASYNC_CMD_SAVESTATE_GPU_SYNC)
+		{
+			LatteQuery_UpdateFinishedQueriesForceFinishAll();
+			LatteTextureReadback_UpdateFinishedTransfers(true);
+			if (asyncCommand.savestateSync.unloadCaches != 0)
+			{
+				LatteTC_UnloadAllTextures();
+				LatteBufferCache_UnloadAll();
+				LatteSHRC_ResetCachedShaderHash();
+				LatteIndices_invalidateAll();
+			}
 		}
 		else
 		{

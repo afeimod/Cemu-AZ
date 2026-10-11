@@ -44,6 +44,11 @@ namespace coreinit
 			return m_nextFire;
 		}
 
+		uint64 getPeriod() const
+		{
+			return m_period;
+		}
+
 		void triggerAlarm(uint64 currentTick)
 		{
 			m_callbackFunc(currentTick, m_context);
@@ -347,6 +352,83 @@ namespace coreinit
 				PPCCoreCallback(_swapEndianU32(alarm->handler), alarm, &(g_alarmThread.GetPtr()->context));
 			}
 		}
+	}
+
+	// savestate support
+	void SavestateCaptureAlarms(std::vector<uint8>& out)
+	{
+		__OSLockScheduler();
+		auto appendU32 = [&out](uint32 v)
+		{
+			out.push_back((uint8)(v));
+			out.push_back((uint8)(v >> 8));
+			out.push_back((uint8)(v >> 16));
+			out.push_back((uint8)(v >> 24));
+		};
+		auto appendU64 = [&out](uint64 v)
+		{
+			for (uint32 i = 0; i < 8; ++i)
+				out.push_back((uint8)(v >> (i * 8)));
+		};
+		appendU32((uint32)g_activeAlarms.size());
+		for (auto& itr : g_activeAlarms)
+		{
+			appendU32(memory_getVirtualOffsetFromPointer(itr.first));
+			appendU64(itr.second->getFireTick());
+			appendU64(itr.second->getPeriod());
+		}
+		__OSUnlockScheduler();
+	}
+
+	bool SavestateRestoreAlarms(const uint8*& p, const uint8* end)
+	{
+		auto readU32 = [&p, &end](uint32& v) -> bool
+		{
+			if ((size_t)(end - p) < 4)
+				return false;
+			v = (uint32)p[0] | ((uint32)p[1] << 8) | ((uint32)p[2] << 16) | ((uint32)p[3] << 24);
+			p += 4;
+			return true;
+		};
+		auto readU64 = [&p, &end](uint64& v) -> bool
+		{
+			if ((size_t)(end - p) < 8)
+				return false;
+			v = 0;
+			for (uint32 i = 0; i < 8; ++i)
+				v |= ((uint64)p[i]) << (i * 8);
+			p += 8;
+			return true;
+		};
+		uint32 count = 0;
+		if (!readU32(count) || count > 4096)
+			return false;
+		if ((size_t)(end - p) < (size_t)count * 20)
+			return false;
+		__OSLockScheduler();
+		// drop the current registry (it contains alarms from the discarded
+		// timeline) and rebuild it from the snapshot
+		for (auto& itr : g_activeAlarms)
+			OSHostAlarmDestroy(itr.second);
+		g_activeAlarms.clear();
+		OSHostAlarm::Reset();
+		for (uint32 i = 0; i < count; ++i)
+		{
+			uint32 alarmOffset = 0;
+			uint64 nextFire = 0;
+			uint64 period = 0;
+			readU32(alarmOffset);
+			readU64(nextFire);
+			readU64(period);
+			if (!MMU_IsInPPCMemorySpace(alarmOffset))
+				continue;
+			OSAlarm_t* alarm = (OSAlarm_t*)memory_getPointerFromVirtualOffset(alarmOffset);
+			if (!alarm->checkMagic())
+				continue;
+			g_activeAlarms[alarm] = OSHostAlarmCreate(nextFire, period, __OSHostAlarmTriggered, nullptr);
+		}
+		__OSUnlockScheduler();
+		return true;
 	}
 
 	void MapAlarmExports()

@@ -394,4 +394,14 @@ namespace snd_core
 
 	COSModule* GetModuleSndCore1();
 	COSModule* GetModuleSndCore2();
+
+	// savestate support: the voice lists and AX callbacks are host-side state
+	// which is not covered by the emulated memory snapshot. Serialization
+	// format: u32 numVoices, u32 freeCount, u16 freeIndices[freeCount], then
+	// for each of the AX_PRIORITY_MAX priority lists u32 count and
+	// u16 indices[count], then u32 frameCallback, then
+	// u32 appFrameCallback[AX_APP_FRAME_CALLBACK_MAX], then
+	// u32 deviceFinalMixCallback[AX_DEV_COUNT]
+	void SavestateCaptureHostState(std::vector<uint8>& out);
+	bool SavestateRestoreHostState(const uint8*& p, const uint8* end);
 }

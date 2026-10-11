@@ -505,6 +505,126 @@ namespace snd_core
 		AXVPBInit();
 	}
 
+	// defined in ax_ist.cpp
+	extern MPTR __AXFrameCallback;
+	extern MPTR __AXAppFrameCallback[AX_APP_FRAME_CALLBACK_MAX];
+	extern MPTR __AXDeviceFinalMixCallback[AX_DEV_COUNT];
+
+	// savestate support: serialize/deserialize the host-side voice lists and
+	// AX callbacks so a restored snapshot keeps a consistent mixer state
+	void SavestateCaptureHostState(std::vector<uint8>& out)
+	{
+		auto appendU16 = [&out](uint16 v)
+		{
+			out.push_back((uint8)(v));
+			out.push_back((uint8)(v >> 8));
+		};
+		auto appendU32 = [&out](uint32 v)
+		{
+			out.push_back((uint8)(v));
+			out.push_back((uint8)(v >> 8));
+			out.push_back((uint8)(v >> 16));
+			out.push_back((uint8)(v >> 24));
+		};
+		__AXVoiceListSpinlock.lock();
+		appendU32((uint32)AX_MAX_VOICES);
+		appendU32((uint32)__AXFreeVoices.size());
+		for (auto* vpb : __AXFreeVoices)
+			appendU16((uint16)GetVoiceIndex(vpb));
+		for (uint32 p = 0; p < AX_PRIORITY_MAX; ++p)
+		{
+			appendU32((uint32)__AXVoicesPerPriority[p].size());
+			for (auto* vpb : __AXVoicesPerPriority[p])
+				appendU16((uint16)GetVoiceIndex(vpb));
+		}
+		__AXVoiceListSpinlock.unlock();
+		appendU32(__AXFrameCallback);
+		for (uint32 i = 0; i < AX_APP_FRAME_CALLBACK_MAX; ++i)
+			appendU32(__AXAppFrameCallback[i]);
+		for (uint32 i = 0; i < AX_DEV_COUNT; ++i)
+			appendU32(__AXDeviceFinalMixCallback[i]);
+	}
+
+	bool SavestateRestoreHostState(const uint8*& p, const uint8* end)
+	{
+		auto readU16 = [&p, &end](uint16& v) -> bool
+		{
+			if ((size_t)(end - p) < 2)
+				return false;
+			v = (uint16)p[0] | ((uint16)p[1] << 8);
+			p += 2;
+			return true;
+		};
+		auto readU32 = [&p, &end](uint32& v) -> bool
+		{
+			if ((size_t)(end - p) < 4)
+				return false;
+			v = (uint32)p[0] | ((uint32)p[1] << 8) | ((uint32)p[2] << 16) | ((uint32)p[3] << 24);
+			p += 4;
+			return true;
+		};
+		uint32 numVoices = 0;
+		if (!readU32(numVoices) || numVoices != (uint32)AX_MAX_VOICES)
+			return false;
+		__AXVoiceListSpinlock.lock();
+		AXVoiceList_Reset();
+		uint32 freeCount = 0;
+		if (!readU32(freeCount) || freeCount > (uint32)AX_MAX_VOICES)
+		{
+			__AXVoiceListSpinlock.unlock();
+			return false;
+		}
+		for (uint32 i = 0; i < freeCount; ++i)
+		{
+			uint16 index = 0;
+			if (!readU16(index) || index >= (uint32)AX_MAX_VOICES)
+			{
+				__AXVoiceListSpinlock.unlock();
+				return false;
+			}
+			__AXFreeVoices.push_back(__AXVPBArrayPtr + index);
+		}
+		for (uint32 prio = 0; prio < AX_PRIORITY_MAX; ++prio)
+		{
+			uint32 count = 0;
+			if (!readU32(count) || count > (uint32)AX_MAX_VOICES)
+			{
+				__AXVoiceListSpinlock.unlock();
+				return false;
+			}
+			for (uint32 i = 0; i < count; ++i)
+			{
+				uint16 index = 0;
+				if (!readU16(index) || index >= (uint32)AX_MAX_VOICES)
+				{
+					__AXVoiceListSpinlock.unlock();
+					return false;
+				}
+				__AXVoicesPerPriority[prio].push_back(__AXVPBArrayPtr + index);
+			}
+		}
+		__AXVoiceListSpinlock.unlock();
+		uint32 frameCallback = 0;
+		if (!readU32(frameCallback))
+			return false;
+		__AXFrameCallback = frameCallback;
+		for (uint32 i = 0; i < AX_APP_FRAME_CALLBACK_MAX; ++i)
+		{
+			uint32 cb = 0;
+			if (!readU32(cb))
+				return false;
+			__AXAppFrameCallback[i] = cb;
+		}
+		for (uint32 i = 0; i < AX_DEV_COUNT; ++i)
+		{
+			uint32 cb = 0;
+			if (!readU32(cb))
+				return false;
+			__AXDeviceFinalMixCallback[i] = cb;
+		}
+		return true;
+	}
+
     void AXVBP_Reset()
     {
         AXVoiceList_Reset();

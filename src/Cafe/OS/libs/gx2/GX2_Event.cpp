@@ -157,6 +157,11 @@ namespace GX2
 	SysAllocator<coreinit::OSSemaphore> s_eventCbQueueSemaphore;
 	ConcurrentQueue<GX2EventQueueEntry> s_eventCbQueue;
 
+	void ResetQueuedEventCallbacks()
+	{
+		s_eventCbQueue.clear();
+	}
+
 	void __GX2NotifyEvent(GX2CallbackEventType eventType)
 	{
 		if ((size_t)eventType >= GX2CallbackEventTypeCount)

@@ -18,6 +18,9 @@
 
 #include <boost/container/small_vector.hpp>
 
+#include <chrono>
+#include <thread>
+
 void LatteCP_DebugPrintCmdBuffer(uint32be* bufferPtr, uint32 size);
 
 #define CP_TIMER_RECHECK	1024
@@ -180,6 +183,13 @@ uint32 LatteCP_readU32Deprc()
 		for (sint32 busy = 0; busy < 80; busy++)
 		{
 			_mm_pause();
+		}
+		if (g_savestateFreezeGpuThread.load(std::memory_order_relaxed))
+		{
+			// a savestate capture/restore is currently accessing emulated
+			// memory - park here and do not upload or present anything
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+			continue;
 		}
 		LatteThread_HandleOSScreen(); // check if new frame was presented via OSScreen API
 
