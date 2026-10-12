@@ -1,4 +1,5 @@
 #pragma once
+#include <atomic>
 #include "Cafe/HW/Latte/Core/LatteConst.h"
 #include "Cafe/HW/Latte/ISA/LatteReg.h"
 #include "util/VirtualHeap/VirtualHeap.h"

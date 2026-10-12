@@ -447,8 +447,8 @@ VkSwapchainCreateInfoKHR SwapchainInfoVk::CreateSwapchainCreateInfo(VkSurfaceKHR
 	else
 	{
 		const VkCompositeAlphaFlagsKHR supportedCompositeAlpha = swapchainSupport.capabilities.supportedCompositeAlpha;
-		if (supportedCompositeAlpha & VK_COMPOSITE_ALPHA_PREMULTIPLIED_BIT_KHR)
-			createInfo.compositeAlpha = VK_COMPOSITE_ALPHA_PREMULTIPLIED_BIT_KHR;
+		if (supportedCompositeAlpha & VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR)
+			createInfo.compositeAlpha = VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR;
 		else
 		{
 			createInfo.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
