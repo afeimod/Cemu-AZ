@@ -234,5 +234,11 @@ namespace iosu
 		// savestate support: roll open files back to their snapshot state
 		void FSARestoreFileStates(const std::vector<FSAFileStateEntry>& entries);
 
+		// savestate support: freeze the FSA IO thread while a snapshot owns
+		// emulated memory. FSA reads/writes copy data into and out of emulated
+		// buffers and would otherwise race the memory snapshot
+		void SavestateSetFrozen(bool frozen);
+		bool SavestateWaitIdle(uint32 timeoutMs);
+
 	} // namespace fsa
 } // namespace iosu

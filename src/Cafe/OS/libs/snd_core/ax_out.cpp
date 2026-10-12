@@ -565,7 +565,11 @@ namespace snd_core
 
                 if (snd_core::isInitialized())
                 {
-                        if (numQueuedFramesSndGeneric == snd_core::getNumProcessedFrames())
+                        // signed difference instead of strict equality: a frame restored from a
+                        // savestate can make the processed counter briefly run ahead of the queued
+                        // counter, which permanently wedged the pump (== never true) and muted all
+                        // audio after an in-place restore. <= 0 self-heals within one pump period.
+                        if ((sint32)numQueuedFramesSndGeneric - (sint32)snd_core::getNumProcessedFrames() <= 0)
                         {
                                 AXOut_updateDevicePlayState(true);
                                 snd_core::AXIst_QueueFrame();

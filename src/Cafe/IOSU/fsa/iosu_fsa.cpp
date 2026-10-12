@@ -9,6 +9,10 @@
 
 #include "Cafe/HW/MMU/MMU.h"
 
+#include <atomic>
+#include <chrono>
+#include <thread>
+
 using namespace iosu::kernel;
 
 namespace iosu
@@ -18,6 +22,13 @@ namespace iosu
 		IOSMsgQueueId sFSAIoMsgQueue;
 		SysAllocator<iosu::kernel::IOSMessage, 352> _m_sFSAIoMsgQueueMsgBuffer;
 		std::thread sFSAIoThread;
+
+		// savestate support: while a savestate capture/restore owns emulated memory,
+		// pending FSA requests must not be processed - FSA reads/writes copy data
+		// into and out of emulated buffers, which would race the memory snapshot
+		// and leave the restored state torn (probabilistic freeze after load)
+		std::atomic<bool> sSavestateFrozen{ false };
+		std::atomic<bool> sIoRequestProcessing{ false };
 
 		struct FSAClient // IOSU's counterpart to the coreinit FSClient struct
 		{
@@ -933,6 +944,12 @@ namespace iosu
 					return; // shutdown signaled
 				IPCCommandBody* cmd = MEMPTR<IPCCommandBody>(msg).GetPtr();
 				uint32 clientHandle = (uint32)cmd->devHandle;
+				// savestate freeze gate: delay processing while a snapshot owns emulated
+				// memory. The requesting emulated thread is suspended anyway, so delaying
+				// the reply until the snapshot is done is always safe
+				while (sSavestateFrozen.load(std::memory_order_acquire))
+					std::this_thread::sleep_for(std::chrono::milliseconds(1));
+				sIoRequestProcessing.store(true, std::memory_order_release);
 				if (cmd->cmdId == IPCCommandId::IOS_OPEN)
 				{
 					sint32 clientIndex = 0;
@@ -943,6 +960,7 @@ namespace iosu
 						continue;
 					}
 					IOS_ResourceReply(cmd, (IOS_ERROR)clientIndex);
+					sIoRequestProcessing.store(false, std::memory_order_release);
 					continue;
 				}
 				else if (cmd->cmdId == IPCCommandId::IOS_CLOSE)
@@ -950,6 +968,7 @@ namespace iosu
 					cemu_assert(clientHandle < sFSAClientArray.size());
 					sFSAClientArray[clientHandle].ReleaseAndCleanup();
 					IOS_ResourceReply(cmd, IOS_ERROR_OK);
+					sIoRequestProcessing.store(false, std::memory_order_release);
 					continue;
 				}
 				else if (cmd->cmdId == IPCCommandId::IOS_IOCTL)
@@ -974,7 +993,25 @@ namespace iosu
 					cemu_assert_suspicious();
 					IOS_ResourceReply(cmd, IOS_ERROR_INVALID);
 				}
+				sIoRequestProcessing.store(false, std::memory_order_release);
 			}
+		}
+
+		void SavestateSetFrozen(bool frozen)
+		{
+			sSavestateFrozen.store(frozen, std::memory_order_release);
+		}
+
+		bool SavestateWaitIdle(uint32 timeoutMs)
+		{
+			const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+			while (std::chrono::steady_clock::now() < deadline)
+			{
+				if (!sIoRequestProcessing.load(std::memory_order_acquire))
+					return true;
+				std::this_thread::sleep_for(std::chrono::milliseconds(1));
+			}
+			return !sIoRequestProcessing.load(std::memory_order_acquire);
 		}
 
 		void Initialize()

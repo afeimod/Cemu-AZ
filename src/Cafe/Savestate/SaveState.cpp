@@ -16,8 +16,10 @@
 #include "Cafe/OS/libs/gx2/GX2_Event.h"
 #include "Cafe/Cheats/CheatManager.h"
 
+#include <algorithm>
 #include <chrono>
 #include <ctime>
+#include <zstd.h>
 #include <fstream>
 #include <thread>
 #include <vector>
@@ -36,10 +38,18 @@ namespace
 // lists, AX callbacks and the coreinit alarm registry). Version 1 files
 // (without the blob) can still be restored, the host lists are then left
 // as they are
-		constexpr uint32 kStateVersion = 2;
+// version 3 compresses every memory range payload with zstd. This shrinks
+// the on-disk state from ~1.4 GB of raw memory to roughly 100-300 MB for
+// typical games (most of the emulated memory is zero pages) while staying
+// fully backward compatible on the restore side
+		constexpr uint32 kStateVersion = 3;
+		// header flag: memory range payloads are zstd-compressed (version 3+)
+		constexpr uint32 kStateFlagCompressedRanges = 0x00000001;
 
 		constexpr uint32 kThreadsIdleTimeoutMs = 2000;
 		constexpr uint32 kGpuIdleTimeoutMs = 2000;
+		constexpr uint32 kFsaIdleTimeoutMs = 5000;
+		constexpr uint32 kSettleWindowMs = 100;
 
 		struct SaveStateHeader
 		{
@@ -50,7 +60,7 @@ namespace
 				uint32 rangeCount;
 				uint32 sysAreaAllocatorOffset;
 				uint32 fsEntryCount;
-				uint32 reserved;
+				uint32 flags; // version 3+: kStateFlag... (was 'reserved')
 		};
 		static_assert(sizeof(SaveStateHeader) == 40);
 
@@ -125,6 +135,79 @@ namespace
 				AppendU32LE(blob, (uint32)section.size());
 				blob.insert(blob.end(), section.begin(), section.end());
 		}
+
+		// streaming zstd compression of one memory range. The source is the
+		// emulated memory itself, so no additional host-sized buffer is needed;
+		// output is flushed in 1 MB chunks directly into the state file
+		bool WriteCompressedRange(std::ofstream& out, const void* data, uint32 size, uint64& writtenOut)
+		{
+				ZSTD_CCtx* cctx = ZSTD_createCCtx();
+				if (!cctx)
+						return false;
+				ZSTD_CCtx_setParameter(cctx, ZSTD_c_compressionLevel, 3);
+				constexpr size_t kChunkSize = 1024 * 1024;
+				std::vector<uint8> outChunk(kChunkSize);
+				ZSTD_inBuffer in{ data, size, 0 };
+				uint64 written = 0;
+				while (true)
+				{
+						ZSTD_outBuffer outChunkDesc{ outChunk.data(), outChunk.size(), 0 };
+						const size_t remaining = ZSTD_compressStream2(cctx, &outChunkDesc, &in, ZSTD_e_end);
+						if (ZSTD_isError(remaining))
+						{
+								ZSTD_freeCCtx(cctx);
+								return false;
+						}
+						out.write((const char*)outChunkDesc.dst, outChunkDesc.pos);
+						written += outChunkDesc.pos;
+						if (!out)
+						{
+								ZSTD_freeCCtx(cctx);
+								return false;
+						}
+						if (remaining == 0)
+								break; // frame finished, input fully consumed
+				}
+				ZSTD_freeCCtx(cctx);
+				writtenOut = written;
+				return true;
+		}
+
+		// streaming zstd decompression directly into the target emulated memory
+		// range - no host-sized intermediate buffer is allocated
+		bool ReadCompressedRange(std::ifstream& in, void* dest, uint32 uncompressedSize, uint32 compressedSize)
+		{
+				ZSTD_DCtx* dctx = ZSTD_createDCtx();
+				if (!dctx)
+						return false;
+				ZSTD_outBuffer out{ dest, uncompressedSize, 0 };
+				constexpr size_t kChunkSize = 256 * 1024;
+				std::vector<uint8> inChunk(kChunkSize);
+				uint64 remaining = compressedSize;
+				while (out.pos < out.size && remaining > 0)
+				{
+						const uint32 toRead = (uint32)std::min<uint64>(kChunkSize, remaining);
+						in.read((char*)inChunk.data(), toRead);
+						if (!in)
+						{
+								ZSTD_freeDCtx(dctx);
+								return false;
+						}
+						remaining -= toRead;
+						ZSTD_inBuffer inDesc{ inChunk.data(), toRead, 0 };
+						while (inDesc.pos < inDesc.size)
+						{
+								const size_t r = ZSTD_decompressStream(dctx, &out, &inDesc);
+								if (ZSTD_isError(r))
+								{
+										ZSTD_freeDCtx(dctx);
+										return false;
+								}
+						}
+				}
+				ZSTD_freeDCtx(dctx);
+				return out.pos == out.size && remaining == 0;
+		}
 }
 
 namespace CafeSaveState
@@ -175,6 +258,14 @@ namespace CafeSaveState
 				}
 
 				LogInfo(fmt::format("freeze: threads idle ({} ms)", elapsedMs()));
+				// freeze the FSA IO thread before anything else touches emulated memory.
+				// FSA reads/writes copy file data into and out of emulated buffers on a
+				// dedicated host thread - without this gate a file request finishing
+				// during the capture/restore leaves the state torn (probabilistic freeze
+				// or corrupted save files after an in-place restore)
+				iosu::fsa::SavestateSetFrozen(true);
+				if (!iosu::fsa::SavestateWaitIdle(kFsaIdleTimeoutMs))
+						LogWarning("FSA IO thread did not become idle in time - continuing");
 				// drain the command ring before pausing the vsync timing - a GPU thread
 				// blocked in a flip wait needs the vsync counter to keep advancing
 				if (!TCL::WaitForGPUIdle(kGpuIdleTimeoutMs))
@@ -218,6 +309,12 @@ namespace CafeSaveState
 				// (also stops OSScreen uploads from racing the snapshot)
 				g_savestateFreezeGpuThread.store(true);
 
+				// settle window: a vsync/flip already in flight on the GPU thread when
+				// LatteTiming_setPaused() landed can still mutate the emulated flip
+				// counters for a few more iterations. Give it time to finish, then
+				// re-verify that the capture point is stable - this closes the TOCTOU
+				// window between the pause flags and the actual snapshot copy
+				std::this_thread::sleep_for(std::chrono::milliseconds(kSettleWindowMs));
 				if (!IsAtSafeGpuPoint())
 				{
 								// not fatal: the game will simply redraw the affected surfaces
@@ -243,6 +340,9 @@ namespace CafeSaveState
 										LogWarning("GPU cache reset did not complete in time - continuing");
 				}
 				LogInfo("freeze: releasing timing + gpu park");
+				// let the FSA IO thread process file requests again before any emulated
+				// thread is resumed
+				iosu::fsa::SavestateSetFrozen(false);
 				if (m_frozenTiming)
 				{
 						coreinit::SetSystemEventsPaused(false);
@@ -299,7 +399,7 @@ namespace CafeSaveState
 				header.rangeCount = (uint32)ranges.size();
 				header.sysAreaAllocatorOffset = (uint32)sysAreaAllocatorOffset;
 				header.fsEntryCount = (uint32)fileStates.size();
-				header.reserved = 0;
+				header.flags = kStateFlagCompressedRanges; // version 3: zstd-compressed memory payloads
 
 				out.write((const char*)&header, sizeof(header));
 
@@ -308,7 +408,19 @@ namespace CafeSaveState
 				{
 						RangeHeader rangeHeader{ range->getBase(), range->getSize() };
 						out.write((const char*)&rangeHeader, sizeof(rangeHeader));
-						out.write((const char*)range->getPtr(), range->getSize());
+						// version 3: compress the payload with zstd (level 3). Emulated memory is
+						// largely zero pages, so the on-disk state shrinks by roughly 5-10x
+						uint64 written = 0;
+						if (!WriteCompressedRange(out, range->getPtr(), range->getSize(), written))
+						{
+								out.close();
+								fs::remove(tmpPath, ec);
+								result.errorMessage = "Failed to compress memory range to state file";
+								LogWarning(result.errorMessage);
+								return result;
+						}
+						const uint32 compressedSize = (uint32)written;
+						out.write((const char*)&compressedSize, sizeof(compressedSize));
 						if (!out)
 						{
 								out.close();
@@ -317,7 +429,7 @@ namespace CafeSaveState
 								LogWarning(result.errorMessage);
 								return result;
 						}
-						totalBytes += sizeof(rangeHeader) + range->getSize();
+						totalBytes += sizeof(rangeHeader) + sizeof(compressedSize) + written;
 				}
 
 				for (const iosu::fsa::FSAFileStateEntry& entry : fileStates)
@@ -373,7 +485,7 @@ namespace CafeSaveState
 						return result;
 				}
 
-				LogInfo(fmt::format("Captured state for {:016x} ({:.1f} MB, {} file handles)",
+				LogInfo(fmt::format("Captured state for {:016x} (zstd compressed, {:.1f} MB, {} file handles)",
 						titleId, (double)totalBytes / 1024.0 / 1024.0, fileStates.size()));
 
 				result.success = true;
@@ -418,10 +530,15 @@ namespace CafeSaveState
 						uint32 baseAddress;
 						uint32 size;
 						uint64 fileOffset;
+						uint32 compressedSize{ 0 }; // 0 = raw payload (legacy version 1/2 files)
 				};
 				std::vector<PendingRange> pendingRanges;
 				pendingRanges.reserve(header.rangeCount);
 
+				// version 3+ stores zstd-compressed memory payloads (header flag),
+				// version 1/2 files contain raw memory dumps and remain readable
+				const bool compressedRanges =
+					header.version >= 3 && (header.flags & kStateFlagCompressedRanges) != 0;
 				// resolve and validate every range against the current memory mapping
 				const std::vector<MMURange*> currentRanges = memory_getMMURanges();
 				for (uint32 i = 0; i < header.rangeCount; ++i)
@@ -458,8 +575,23 @@ namespace CafeSaveState
 						pending.baseAddress = rangeHeader.baseAddress;
 						pending.size = rangeHeader.size;
 						pending.fileOffset = (uint64)in.tellg();
+						if (compressedRanges)
+						{
+								uint32 compressedSize = 0;
+								in.read((char*)&compressedSize, sizeof(compressedSize));
+								if (!in)
+								{
+										result.errorMessage = "State file is truncated (range payload)";
+										return result;
+								}
+								pending.compressedSize = compressedSize;
+								in.seekg((std::streamoff)compressedSize, std::ios::cur);
+						}
+						else
+						{
+								in.seekg((std::streamoff)pending.size, std::ios::cur);
+						}
 						pendingRanges.emplace_back(pending);
-						in.seekg((std::streamoff)pending.size, std::ios::cur);
 				}
 
 				// read the file handle states. all memory payload reads in the
@@ -551,12 +683,24 @@ namespace CafeSaveState
 								}
 						}
 						in.seekg((std::streamoff)pending.fileOffset, std::ios::beg);
-						in.read((char*)target->getPtr(), pending.size);
-						if (!in)
+						if (pending.compressedSize > 0)
 						{
-								result.errorMessage = "Failed to read memory range from state file";
-								LogWarning(result.errorMessage);
-								return result;
+								if (!ReadCompressedRange(in, target->getPtr(), pending.size, pending.compressedSize))
+								{
+										result.errorMessage = fmt::format("Failed to decompress memory range {:08x}", pending.baseAddress);
+										LogWarning(result.errorMessage);
+										return result;
+								}
+						}
+						else
+						{
+								in.read((char*)target->getPtr(), pending.size);
+								if (!in)
+								{
+										result.errorMessage = "Failed to read memory range from state file";
+										LogWarning(result.errorMessage);
+										return result;
+								}
 						}
 				}
 

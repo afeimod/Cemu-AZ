@@ -73,6 +73,19 @@ void InputManager::load() noexcept
 			cemuLog_log(LogType::Force, "can't load controller profile: {}", ex.what());
 		}
 	}
+#ifdef __ANDROID__
+	// first-install default: player 1 uses the Wii U GamePad so the on-screen
+	// overlay controls work out of the box. Only applied when no controller
+	// profile exists for player 0 - an explicit user choice (including a
+	// deliberately disabled controller) is always loaded from its profile
+	// and therefore never overridden by this fallback
+	if (!get_controller(0))
+	{
+		auto defaultController = ControllerFactory::CreateEmulatedController(0, EmulatedController::Type::VPAD);
+		if (defaultController)
+			set_controller(defaultController);
+	}
+#endif
 }
 
 bool InputManager::load(size_t player_index, std::string_view filename)
