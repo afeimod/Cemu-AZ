@@ -145,6 +145,10 @@ namespace
 				if (!cctx)
 						return false;
 				ZSTD_CCtx_setParameter(cctx, ZSTD_c_compressionLevel, 3);
+				// store a frame checksum so corrupted payloads are rejected during
+				// decompression instead of silently decoding garbage into emulated
+				// memory (which would crash the game after an in-place restore)
+				ZSTD_CCtx_setParameter(cctx, ZSTD_c_checksumFlag, 1);
 				constexpr size_t kChunkSize = 1024 * 1024;
 				std::vector<uint8> outChunk(kChunkSize);
 				ZSTD_inBuffer in{ data, size, 0 };
@@ -209,11 +213,69 @@ namespace
 				return out.pos == out.size && remaining == 0;
 		}
 
+		// pre-validate a compressed payload without touching emulated memory:
+		// stream exactly compressedSize bytes through zstd, discarding the
+		// output, and require the frame to be complete and to decode to exactly
+		// uncompressedSize bytes. this runs during the scan phase so that a
+		// corrupt payload is rejected before the apply phase overwrites the
+		// emulation memory (a torn overwrite would crash the resumed game)
+		bool ValidateCompressedRange(std::ifstream& in, uint32 uncompressedSize, uint32 compressedSize)
+		{
+				ZSTD_DCtx* dctx = ZSTD_createDCtx();
+				if (!dctx)
+						return false;
+				constexpr size_t kInChunkSize = 256 * 1024;
+				constexpr size_t kDiscardSize = 1024 * 1024;
+				std::vector<uint8> inChunk(kInChunkSize);
+				std::vector<uint8> discardChunk(kDiscardSize);
+				uint64 inRemaining = compressedSize;
+				uint64 totalOut = 0;
+				bool frameDone = false;
+				while (!frameDone && inRemaining > 0)
+				{
+						const uint32 toRead = (uint32)std::min<uint64>(kInChunkSize, inRemaining);
+						in.read((char*)inChunk.data(), toRead);
+						if (!in)
+						{
+								ZSTD_freeDCtx(dctx);
+								return false;
+						}
+						inRemaining -= toRead;
+						ZSTD_inBuffer inDesc{ inChunk.data(), toRead, 0 };
+						while (inDesc.pos < inDesc.size)
+						{
+								ZSTD_outBuffer outDiscard{ discardChunk.data(), discardChunk.size(), 0 };
+								const size_t r = ZSTD_decompressStream(dctx, &outDiscard, &inDesc);
+								if (ZSTD_isError(r))
+								{
+										ZSTD_freeDCtx(dctx);
+										return false;
+								}
+								totalOut += outDiscard.pos;
+								if (r == 0)
+								{
+										frameDone = true;
+										break;
+								}
+								if (totalOut > (uint64)uncompressedSize)
+								{
+										// decodes to more than the recorded range size
+										ZSTD_freeDCtx(dctx);
+										return false;
+								}
+						}
+				}
+				ZSTD_freeDCtx(dctx);
+				// the frame must be complete, the payload must be consumed exactly
+				// and the decoded size must match the range size exactly
+				return frameDone && inRemaining == 0 && totalOut == (uint64)uncompressedSize;
+		}
+
 		// legacy compatibility: state files written by the defective build
 		// placed the compressed size *after* the payload, so the payload starts
 		// with the zstd frame magic where the size field is expected. decode and
 		// discard the frame to locate its end, then read the trailing size field
-		bool SkipLegacyCompressedRange(std::ifstream& in, uint32& compressedSizeOut)
+		bool SkipLegacyCompressedRange(std::ifstream& in, uint32 uncompressedSize, uint32& compressedSizeOut)
 		{
 				ZSTD_DCtx* dctx = ZSTD_createDCtx();
 				if (!dctx)
@@ -223,6 +285,7 @@ namespace
 				std::vector<uint8> inChunk(kInChunkSize);
 				std::vector<uint8> discardChunk(kDiscardSize);
 				bool frameDone = false;
+				uint64 totalOut = 0;
 				while (!frameDone)
 				{
 						in.read((char*)inChunk.data(), kInChunkSize);
@@ -244,9 +307,16 @@ namespace
 										ZSTD_freeDCtx(dctx);
 										return false;
 								}
+								totalOut += outDiscard.pos;
 								if (r == 0)
 								{
 										frameDone = true;
+										// the frame must decode to exactly the recorded range size
+										if (totalOut != (uint64)uncompressedSize)
+										{
+												ZSTD_freeDCtx(dctx);
+												return false;
+										}
 										break;
 								}
 						}
@@ -663,7 +733,7 @@ namespace CafeSaveState
 										// there before decoding
 										in.seekg((std::streamoff)pending.fileOffset, std::ios::beg);
 										uint32 legacySize = 0;
-										if (!SkipLegacyCompressedRange(in, legacySize))
+										if (!SkipLegacyCompressedRange(in, pending.size, legacySize))
 										{
 												result.errorMessage = "State file is corrupted (legacy compressed payload)";
 												return result;
@@ -673,9 +743,25 @@ namespace CafeSaveState
 								}
 								else
 								{
+										if (compressedSize == 0)
+										{
+												// a zstd frame is never smaller than its magic - a zero
+												// size field means the size patch-up failed when this
+												// file was written
+												result.errorMessage = fmt::format("Memory range {:08x} has a zero compressed size", rangeHeader.baseAddress);
+												return result;
+										}
 										pending.compressedSize = compressedSize;
 										pending.fileOffset = (uint64)in.tellg(); // start of the payload
-										in.seekg((std::streamoff)compressedSize, std::ios::cur);
+										// pre-validate the payload by streaming it once through zstd
+										// (discarding the output) - a corrupt or mismatched frame is
+										// rejected before the apply phase overwrites emulation memory.
+										// on success the stream is positioned at the end of the payload
+										if (!ValidateCompressedRange(in, pending.size, compressedSize))
+										{
+												result.errorMessage = fmt::format("Memory range {:08x} has a corrupted compressed payload", rangeHeader.baseAddress);
+												return result;
+										}
 								}
 						}
 						else
@@ -791,6 +877,15 @@ namespace CafeSaveState
 						}
 						else
 						{
+								// compressed state files must never fall back to a raw read -
+								// that would load a compressed payload into emulated memory
+								// as-is and crash the resumed game
+								if (compressedRanges)
+								{
+										result.errorMessage = fmt::format("Memory range {:08x} lost its compressed payload", pending.baseAddress);
+										LogWarning(result.errorMessage);
+										return result;
+								}
 								in.read((char*)target->getPtr(), pending.size);
 								if (!in)
 								{
