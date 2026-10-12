@@ -547,7 +547,9 @@ void LatteOverlay_render(bool pad_view)
 	ImVec2 position{}, pivot{};
 	sint32 direction{};
 
-	if (config.overlay.position != ScreenPosition::kDisabled)
+	// the stats overlay (FPS etc.) is intentionally not drawn on the
+	// GamePad view - it is only rendered on the main TV screen
+	if (config.overlay.position != ScreenPosition::kDisabled && !pad_view)
 	{
 		LatteOverlay_translateScreenPosition(config.overlay.position, window_size, position, pivot, direction);
 		LatteOverlay_renderOverlay(position, pivot, direction, overlayFontSize, pad_view);

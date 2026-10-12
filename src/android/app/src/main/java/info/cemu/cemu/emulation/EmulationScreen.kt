@@ -57,7 +57,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.res.painterResource
@@ -666,11 +665,11 @@ private fun PadOverlaySurface(
             .width(padWidth)
             .height(padHeight)
 
-        if (settings.padOverlayOpacity in 1..99) {
-            padModifier = padModifier.graphicsLayer {
-                alpha = settings.padOverlayOpacity.coerceIn(1, 100) / 100f
-            }
-        }
+        // NOTE: SurfaceView content lives on its own SurfaceFlinger layer,
+        // so Compose layer alpha/blur on this modifier cannot tint
+        // it. The pad opacity is therefore applied directly to the view
+        // via View.setAlpha() inside EmulationSurface (synced to the
+        // compositor layer since API 24).
         if (settings.padOverlayBlur > 0 && Build.VERSION.SDK_INT >= 31) {
             padModifier = padModifier.blur(settings.padOverlayBlur.coerceIn(1, 24).dp)
         }
@@ -679,6 +678,7 @@ private fun PadOverlaySurface(
             modifier = padModifier,
             isTV = false,
             holderCallback = padHolderCallback,
+            viewAlpha = settings.padOverlayOpacity.coerceIn(0, 100) / 100f,
         )
     }
 }
@@ -786,10 +786,14 @@ private fun EmulationSurface(
     modifier: Modifier,
     isTV: Boolean,
     holderCallback: SurfaceHolder.Callback,
-    afterInit: () -> Unit = {}
+    afterInit: () -> Unit = {},
+    // applied via View.setAlpha so it also affects the SurfaceView's
+    // own compositor layer (Compose layer modifiers would be ignored)
+    viewAlpha: Float = 1f
 ) {
     AndroidView(
         modifier = modifier,
+        update = { view -> view.alpha = viewAlpha },
         factory = { context ->
             SurfaceView(context).apply {
                 var firstChange = true
