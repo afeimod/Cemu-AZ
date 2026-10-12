@@ -195,7 +195,7 @@ namespace
 						}
 						remaining -= toRead;
 						ZSTD_inBuffer inDesc{ inChunk.data(), toRead, 0 };
-						while (inDesc.pos < inDesc.size)
+						while (inDesc.pos < inDesc.size && out.pos < out.size)
 						{
 								const size_t r = ZSTD_decompressStream(dctx, &out, &inDesc);
 								if (ZSTD_isError(r))
@@ -207,6 +207,65 @@ namespace
 				}
 				ZSTD_freeDCtx(dctx);
 				return out.pos == out.size && remaining == 0;
+		}
+
+		// legacy compatibility: state files written by the defective build
+		// placed the compressed size *after* the payload, so the payload starts
+		// with the zstd frame magic where the size field is expected. decode and
+		// discard the frame to locate its end, then read the trailing size field
+		bool SkipLegacyCompressedRange(std::ifstream& in, uint32& compressedSizeOut)
+		{
+				ZSTD_DCtx* dctx = ZSTD_createDCtx();
+				if (!dctx)
+						return false;
+				constexpr size_t kInChunkSize = 256 * 1024;
+				constexpr size_t kDiscardSize = 1024 * 1024;
+				std::vector<uint8> inChunk(kInChunkSize);
+				std::vector<uint8> discardChunk(kDiscardSize);
+				bool frameDone = false;
+				while (!frameDone)
+				{
+						in.read((char*)inChunk.data(), kInChunkSize);
+						const size_t got = (size_t)in.gcount();
+						if (got > 0)
+								in.clear(); // a short read at EOF is fine, we received data
+						if (got == 0)
+						{
+								ZSTD_freeDCtx(dctx);
+								return false; // truncated payload
+						}
+						ZSTD_inBuffer inDesc{ inChunk.data(), got, 0 };
+						while (inDesc.pos < inDesc.size)
+						{
+								ZSTD_outBuffer outDiscard{ discardChunk.data(), discardChunk.size(), 0 };
+								const size_t r = ZSTD_decompressStream(dctx, &outDiscard, &inDesc);
+								if (ZSTD_isError(r))
+								{
+										ZSTD_freeDCtx(dctx);
+										return false;
+								}
+								if (r == 0)
+								{
+										frameDone = true;
+										break;
+								}
+						}
+						if (frameDone)
+						{
+								// rewind to the exact end of the frame - the chunk read
+								// above may have overshot into the trailing size field
+								const size_t leftover = inDesc.size - inDesc.pos;
+								if (leftover > 0)
+										in.seekg(-(std::streamoff)leftover, std::ios::cur);
+						}
+				}
+				uint32 legacySize = 0;
+				in.read((char*)&legacySize, sizeof(legacySize));
+				ZSTD_freeDCtx(dctx);
+				if (!in || legacySize == 0)
+						return false;
+				compressedSizeOut = legacySize;
+				return true;
 		}
 }
 
@@ -409,7 +468,13 @@ namespace CafeSaveState
 						RangeHeader rangeHeader{ range->getBase(), range->getSize() };
 						out.write((const char*)&rangeHeader, sizeof(rangeHeader));
 						// version 3: compress the payload with zstd (level 3). Emulated memory is
-						// largely zero pages, so the on-disk state shrinks by roughly 5-10x
+						// largely zero pages, so the on-disk state shrinks by roughly 5-10x.
+						// streaming compression only knows the compressed size after the frame
+						// is finished, so a placeholder is written before the payload and
+						// patched once the payload is complete
+						const std::streamoff sizeFieldPos = (std::streamoff)out.tellp();
+						const uint32 sizePlaceholder = 0;
+						out.write((const char*)&sizePlaceholder, sizeof(sizePlaceholder));
 						uint64 written = 0;
 						if (!WriteCompressedRange(out, range->getPtr(), range->getSize(), written))
 						{
@@ -420,7 +485,11 @@ namespace CafeSaveState
 								return result;
 						}
 						const uint32 compressedSize = (uint32)written;
+						// patch the placeholder which sits before the payload on disk
+						const std::streamoff endPos = (std::streamoff)out.tellp();
+						out.seekp(sizeFieldPos);
 						out.write((const char*)&compressedSize, sizeof(compressedSize));
+						out.seekp(endPos);
 						if (!out)
 						{
 								out.close();
@@ -514,7 +583,7 @@ namespace CafeSaveState
 
 				SaveStateHeader header{};
 				in.read((char*)&header, sizeof(header));
-				if (!in || header.magic != kStateMagic || (header.version != 1 && header.version != 2))
+				if (!in || header.magic != kStateMagic || header.version < 1 || header.version > kStateVersion)
 				{
 						result.errorMessage = "Not a valid savestate file";
 						return result;
@@ -574,9 +643,12 @@ namespace CafeSaveState
 						PendingRange pending;
 						pending.baseAddress = rangeHeader.baseAddress;
 						pending.size = rangeHeader.size;
-						pending.fileOffset = (uint64)in.tellg();
 						if (compressedRanges)
 						{
+								// the position currently holds either the compressed size (correct
+								// v3 layout) or, in files written by the defective build, the zstd
+								// frame magic itself (payload directly follows the range header)
+								pending.fileOffset = (uint64)in.tellg();
 								uint32 compressedSize = 0;
 								in.read((char*)&compressedSize, sizeof(compressedSize));
 								if (!in)
@@ -584,12 +656,37 @@ namespace CafeSaveState
 										result.errorMessage = "State file is truncated (range payload)";
 										return result;
 								}
-								pending.compressedSize = compressedSize;
-								in.seekg((std::streamoff)compressedSize, std::ios::cur);
+								if (compressedSize == ZSTD_MAGICNUMBER)
+								{
+										// legacy defective layout: [payload][size]. the frame begins
+										// at fileOffset (the magic just read is part of it), so rewind
+										// there before decoding
+										in.seekg((std::streamoff)pending.fileOffset, std::ios::beg);
+										uint32 legacySize = 0;
+										if (!SkipLegacyCompressedRange(in, legacySize))
+										{
+												result.errorMessage = "State file is corrupted (legacy compressed payload)";
+												return result;
+										}
+										pending.compressedSize = legacySize;
+										// fileOffset already points at the payload start
+								}
+								else
+								{
+										pending.compressedSize = compressedSize;
+										pending.fileOffset = (uint64)in.tellg(); // start of the payload
+										in.seekg((std::streamoff)compressedSize, std::ios::cur);
+								}
 						}
 						else
 						{
+								pending.fileOffset = (uint64)in.tellg();
 								in.seekg((std::streamoff)pending.size, std::ios::cur);
+						}
+						if (!in)
+						{
+								result.errorMessage = "State file is truncated (range payload)";
+								return result;
 						}
 						pendingRanges.emplace_back(pending);
 				}
