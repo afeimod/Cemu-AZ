@@ -51,6 +51,11 @@ struct LatteGPUState_t
 	bool drcBufferUsesSRGB;
 	float tvGamma = 0.0f;
 	float drcGamma = 0.0f;
+	// Android floating GamePad overlay: per-pixel opacity (0..1) applied to the
+	// DRC/pad view output shader. Written from the UI thread via JNI, read on
+	// the render thread every frame. The value is baked into the premultiplied
+	// alpha of the pad swapchain images, so changing it needs no recreation.
+	std::atomic<float> padOverlayOpacity{1.0f};
 	// draw state
 	bool activeShaderHasError; // if try, at least one currently bound shader stage has an error and cannot be used for drawing
 	bool repeatTextureInitialization; // if set during rendertarget or texture initialization, repeat the process (textures likely have been invalidated)

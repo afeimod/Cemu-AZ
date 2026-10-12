@@ -287,6 +287,8 @@ RendererOutputShader::OutputUniformVariables RendererOutputShader::FillUniformBl
 	vars.applySRGBEncoding = padView ? LatteGPUState.drcBufferUsesSRGB : LatteGPUState.tvBufferUsesSRGB;
 	vars.targetGamma = padView ? ActiveSettings::GetDRCGamma() : ActiveSettings::GetTVGamma();
 	vars.displayGamma = GetConfig().userDisplayGamma;
+	// real per-pixel opacity for the Android floating GamePad overlay
+	vars.padOpacity = padView ? LatteGPUState.padOverlayOpacity.load(std::memory_order_relaxed) : 1.0f;
 
 	return vars;
 }
@@ -457,6 +459,7 @@ uniform vec2 outputResolution;
 uniform bool applySRGBEncoding;
 uniform float targetGamma;
 uniform float displayGamma;
+uniform float padOpacity;
 };
 
 float sRGBEncode(float linear)
@@ -485,6 +488,13 @@ void main()
 		colorOut0 = pow(colorOut0, vec4(targetGamma / displayGamma) );
 	else
 		colorOut0 = vec4( sRGBEncode( pow(colorOut0.rgb, vec3(targetGamma)) ), 1.0f);
+
+	// per-pixel opacity for premultiplied overlay surfaces (Android floating
+	// GamePad view). Applied after all gamma/sRGB processing so it only scales
+	// the final color. padOpacity is 1.0 for the TV view and desktop builds.
+	// On surfaces composited with PREMULTIPLIED alpha (Android compositor
+	// default) this yields out = pad.rgb * opacity + background.rgb * (1 - opacity)
+	colorOut0 = vec4(colorOut0.rgb * padOpacity, colorOut0.a * padOpacity);
 
 }
 

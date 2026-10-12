@@ -11,6 +11,11 @@ object NativeSettings {
     @JvmStatic
     external fun setGameSpeed(speedMode: Int)
 
+    // Floating GamePad overlay opacity in percent (0..100). Applied per-pixel in
+    // the native pad view output shader (premultiplied alpha), no-op otherwise.
+    @JvmStatic
+    external fun setPadOverlayOpacity(value: Int)
+
     @JvmStatic
     external fun addGamesPath(uri: String?)
 

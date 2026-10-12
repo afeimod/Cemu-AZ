@@ -4,6 +4,7 @@
 #include "config/CemuConfig.h"
 #include "config/NetworkSettings.h"
 #include "Cafe/HW/Latte/Core/LatteTiming.h"
+#include "Cafe/HW/Latte/Core/Latte.h"
 
 extern "C" [[maybe_unused]] JNIEXPORT jint JNICALL
 Java_info_cemu_cemu_nativeinterface_NativeSettings_getOverlayPosition([[maybe_unused]] JNIEnv* env, [[maybe_unused]] jclass clazz)
@@ -438,6 +439,20 @@ Java_info_cemu_cemu_nativeinterface_NativeSettings_getGameSpeed([[maybe_unused]]
 	if (shiftFactor <= 4)
 		return 4 - shiftFactor; // shift 4 -> mode 0 (0.5x), shift 0 -> mode 4 (8x)
 	return 1; // out of range values fall back to 1x
+}
+
+// Floating GamePad overlay opacity (0..100%). Consumed per-pixel by the pad
+// view output shader (premultiplied alpha of the pad swapchain images), so
+// updates take effect on the next frame without recreating the swapchain.
+extern "C" [[maybe_unused]] JNIEXPORT void JNICALL
+Java_info_cemu_cemu_nativeinterface_NativeSettings_setPadOverlayOpacity([[maybe_unused]] JNIEnv* env, [[maybe_unused]] jclass clazz, jint opacityPercent)
+{
+	float opacity = static_cast<float>(opacityPercent);
+	if (opacity < 0.0f)
+		opacity = 0.0f;
+	if (opacity > 100.0f)
+		opacity = 100.0f;
+	LatteGPUState.padOverlayOpacity.store(opacity / 100.0f, std::memory_order_relaxed);
 }
 
 extern "C" [[maybe_unused]] JNIEXPORT void JNICALL

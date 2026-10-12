@@ -16,6 +16,9 @@ public:
 		uint32 applySRGBEncoding;
 		float targetGamma;
 		float displayGamma;
+		// per-pixel opacity for premultiplied overlay output (Android pad
+		// view); 1.0 for the TV view and all desktop builds
+		float padOpacity = 1.0f;
 	};
 	enum Shader
 	{

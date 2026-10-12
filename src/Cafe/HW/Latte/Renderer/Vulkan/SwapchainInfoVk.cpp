@@ -436,10 +436,29 @@ VkSwapchainCreateInfoKHR SwapchainInfoVk::CreateSwapchainCreateInfo(VkSurfaceKHR
 		createInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
 #if BOOST_PLAT_ANDROID
 	createInfo.preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+	// The floating GamePad overlay requires real per-pixel transparency of
+	// the pad swapchain images. With OPAQUE the Android compositor ignores
+	// the alpha channel entirely, which made the pad opacity adjustment a
+	// no-op. Request PREMULTIPLIED for the pad surface (the output shader
+	// bakes the opacity into premultiplied colors) and keep OPAQUE for the
+	// TV surface so fullscreen presentation stays on the fast path.
+	if (mainWindow)
+		createInfo.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+	else
+	{
+		const VkCompositeAlphaFlagsKHR supportedCompositeAlpha = swapchainSupport.capabilities.supportedCompositeAlpha;
+		if (supportedCompositeAlpha & VK_COMPOSITE_ALPHA_PREMULTIPLIED_BIT_KHR)
+			createInfo.compositeAlpha = VK_COMPOSITE_ALPHA_PREMULTIPLIED_BIT_KHR;
+		else
+		{
+			createInfo.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+			cemuLog_log(LogType::Force, "Vulkan: pad surface does not support premultiplied alpha (supported: {:x}), pad opacity will be ignored", (uint32)supportedCompositeAlpha);
+		}
+	}
 #else
 	createInfo.preTransform = swapchainSupport.capabilities.currentTransform;
-#endif
 	createInfo.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+#endif
 	createInfo.presentMode = ChoosePresentMode(swapchainSupport.presentModes);
 	createInfo.clipped = VK_TRUE;
 

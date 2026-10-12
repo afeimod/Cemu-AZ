@@ -3,6 +3,7 @@ package info.cemu.cemu.emulation
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
+import android.graphics.PixelFormat
 import android.os.Build
 import android.view.SurfaceHolder
 import android.view.SurfaceView
@@ -173,8 +174,22 @@ fun EmulationScreen(
     LaunchedEffect(Unit) {
         // apply the persisted game speed for this session as early as possible
         // (the side menu only applies it when opened)
-        val storedSpeed = AppSettingsStore.dataStore.data.first().emulationSettings.gameSpeedMode
-        NativeSettings.setGameSpeed(storedSpeed)
+        val storedSettings = AppSettingsStore.dataStore.data.first().emulationSettings
+        NativeSettings.setGameSpeed(storedSettings.gameSpeedMode)
+        // the pad opacity is applied per-pixel by the native pad view output
+        // shader; push it before emulation starts (only for the floating overlay)
+        NativeSettings.setPadOverlayOpacity(
+            if (storedSettings.gamePadPosition.isOverlay()) storedSettings.padOverlayOpacity else 100
+        )
+    }
+
+    LaunchedEffect(emulationSettings) {
+        // re-push the per-pixel pad overlay opacity whenever it or the pad
+        // position changes; takes effect on the next rendered frame
+        val settings = emulationSettings ?: return@LaunchedEffect
+        NativeSettings.setPadOverlayOpacity(
+            if (settings.gamePadPosition.isOverlay()) settings.padOverlayOpacity else 100
+        )
     }
 
     LaunchedEffect(Unit) {
@@ -666,10 +681,12 @@ private fun PadOverlaySurface(
             .height(padHeight)
 
         // NOTE: SurfaceView content lives on its own SurfaceFlinger layer,
-        // so Compose layer alpha/blur on this modifier cannot tint
-        // it. The pad opacity is therefore applied directly to the view
-        // via View.setAlpha() inside EmulationSurface (synced to the
-        // compositor layer since API 24).
+        // so Compose layer alpha/blur on this modifier cannot tint it.
+        // The pad opacity is applied per-pixel inside the native pad view
+        // output shader (premultiplied alpha), and the surface is created
+        // with TRANSLUCENT format (see EmulationSurface) so the compositor
+        // actually blends it. View.setAlpha()/SurfaceControl layer alpha is
+        // deliberately not used.
         if (settings.padOverlayBlur > 0 && Build.VERSION.SDK_INT >= 31) {
             padModifier = padModifier.blur(settings.padOverlayBlur.coerceIn(1, 24).dp)
         }
@@ -678,7 +695,7 @@ private fun PadOverlaySurface(
             modifier = padModifier,
             isTV = false,
             holderCallback = padHolderCallback,
-            viewAlpha = settings.padOverlayOpacity.coerceIn(0, 100) / 100f,
+            translucent = true,
         )
     }
 }
@@ -787,16 +804,22 @@ private fun EmulationSurface(
     isTV: Boolean,
     holderCallback: SurfaceHolder.Callback,
     afterInit: () -> Unit = {},
-    // applied via View.setAlpha so it also affects the SurfaceView's
-    // own compositor layer (Compose layer modifiers would be ignored)
-    viewAlpha: Float = 1f
+    // requests a blending (per-pixel alpha) surface. SurfaceViews are OPAQUE
+    // by default, in which case the compositor skips blending entirely and
+    // ignores any alpha written by the renderer. The opacity itself is applied
+    // per-pixel by the native pad view output shader (premultiplied alpha);
+    // View.setAlpha()/SurfaceControl layer alpha is deliberately not used.
+    translucent: Boolean = false
 ) {
     AndroidView(
         modifier = modifier,
-        update = { view -> view.alpha = viewAlpha },
         factory = { context ->
             SurfaceView(context).apply {
                 var firstChange = true
+
+                if (translucent) {
+                    holder.setFormat(PixelFormat.TRANSLUCENT)
+                }
 
                 setOnTouchListener(CanvasOnTouchListener(isTV))
 
