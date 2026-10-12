@@ -4,10 +4,8 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
 import android.os.Build
-import android.view.SurfaceControl
 import android.view.SurfaceHolder
 import android.view.SurfaceView
-import android.view.View
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -793,13 +791,9 @@ private fun EmulationSurface(
     // own compositor layer (Compose layer modifiers would be ignored)
     viewAlpha: Float = 1f
 ) {
-    // holds the latest opacity so the surface (re)creation callback can
-    // re-apply it to the freshly created SurfaceControl
-    val alphaRef = remember { FloatRef(1f) }
-    alphaRef.value = viewAlpha
     AndroidView(
         modifier = modifier,
-        update = { view -> applySurfaceAlpha(view, alphaRef.value) },
+        update = { view -> view.alpha = viewAlpha },
         factory = { context ->
             SurfaceView(context).apply {
                 var firstChange = true
@@ -816,9 +810,6 @@ private fun EmulationSurface(
                             afterInit()
                             firstChange = false
                         }
-                        // a freshly (re)created surface gets a new SurfaceControl,
-                        // so the layer alpha must be applied again
-                        applySurfaceAlpha(this@apply, alphaRef.value)
                     }
 
                     override fun surfaceCreated(holder: SurfaceHolder) {}
@@ -827,28 +818,6 @@ private fun EmulationSurface(
                 })
             }
         })
-}
-
-private class FloatRef(var value: Float)
-
-// SurfaceView content is composited by SurfaceFlinger on its own layer:
-// View.alpha and Compose layer modifiers cannot tint it. The opacity must
-// be set as a layer alpha through a SurfaceControl transaction (API 29+).
-private fun applySurfaceAlpha(view: View, alpha: Float) {
-    if (view !is SurfaceView) return
-    view.alpha = alpha
-    if (Build.VERSION.SDK_INT >= 29) {
-        val sc = view.surfaceControl
-        if (sc.isValid) {
-            val transaction = SurfaceControl.Transaction()
-            try {
-                transaction.setAlpha(sc, alpha)
-                transaction.apply()
-            } finally {
-                transaction.close()
-            }
-        }
-    }
 }
 
 @Composable
