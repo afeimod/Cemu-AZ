@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -117,6 +118,7 @@ fun QuickSaveSlotsDialog(
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var confirmSaveSlot by remember { mutableStateOf<QuickSaveSlot?>(null) }
     var confirmRestoreSlot by remember { mutableStateOf<QuickSaveSlot?>(null) }
+    var failedSlot by remember { mutableStateOf<Int?>(null) }
     val thumbnails = remember { mutableStateMapOf<Int, Bitmap?>() }
     var autoBackupSlot by remember { mutableStateOf<QuickSaveSlot?>(null) }
 
@@ -187,13 +189,13 @@ fun QuickSaveSlotsDialog(
         }
     }
 
-    fun restoreFromSlot(slotIndex: Int) {
+    fun restoreFromSlot(slotIndex: Int, allowLegacy: Boolean = false) {
         scope.launch {
             working = true
             errorMessage = null
             val result = withContext(Dispatchers.IO) {
                 try {
-                    NativeQuickSave.quickRestoreSlot(slotIndex)
+                    NativeQuickSave.quickRestoreSlot(slotIndex, if (allowLegacy) NativeQuickSave.RESTORE_FLAG_ALLOW_LEGACY else 0)
                 } catch (_: NativeException) {
                     NativeQuickSave.RESULT_ERROR_IO
                 }
@@ -212,7 +214,13 @@ fun QuickSaveSlotsDialog(
                     onRelaunchGame()
                     onDismiss()
                 }
-                else -> errorMessage = resultToMessage(result)
+                else -> {
+                    errorMessage = resultToMessage(result)
+                    if (result == NativeQuickSave.RESULT_ERROR_STATE_RESTORE_FAILED && !allowLegacy) {
+                        // offer the reliable restart-based fallback (safe mode)
+                        failedSlot = slotIndex
+                    }
+                }
             }
         }
     }
@@ -273,6 +281,15 @@ fun QuickSaveSlotsDialog(
                         modifier = Modifier.padding(top = 4.dp),
                     )
                 }
+                failedSlot?.let { failed ->
+                    TextButton(onClick = {
+                        val slotIndex = failed
+                        failedSlot = null
+                        restoreFromSlot(slotIndex, allowLegacy = true)
+                    }) {
+                        Text(tr("Use safe mode"))
+                    }
+                }
                 if (mode == QuickSaveDialogMode.LOAD) {
                     Text(
                         text = tr("Slots with a state file are restored instantly without restarting the game."),
@@ -307,23 +324,41 @@ fun QuickSaveSlotsDialog(
     }
 
     confirmRestoreSlot?.let { slot ->
+        var safeMode by remember(slot) { mutableStateOf(false) }
         AlertDialog(
             onDismissRequest = { if (!working) confirmRestoreSlot = null },
             title = { Text(tr("Restore this save?")) },
             text = {
-                Text(
-                    when {
-                        slot.hasState -> tr("The game will be restored to the exact state from when this snapshot was taken.")
-                        slot.slot == -1 -> tr("The current save progress will be restored from the auto backup. The game will restart.")
-                        else -> tr("The current save progress will be replaced with slot {0}. The game will restart.", slot.slot)
+                Column {
+                    Text(
+                        when {
+                            slot.hasState -> tr("The game will be restored to the exact state from when this snapshot was taken.")
+                            slot.slot == -1 -> tr("The current save progress will be restored from the auto backup. The game will restart.")
+                            else -> tr("The current save progress will be replaced with slot {0}. The game will restart.", slot.slot)
+                        }
+                    )
+                    if (slot.hasState) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { safeMode = !safeMode }
+                                .padding(top = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Checkbox(checked = safeMode, onCheckedChange = { safeMode = it })
+                            Text(
+                                text = tr("Safe mode: restart the game and load the saved data instead"),
+                                fontSize = 12.sp,
+                            )
+                        }
                     }
-                )
+                }
             },
             confirmButton = {
                 TextButton(enabled = !working, onClick = {
                     val slotIndex = slot.slot
                     confirmRestoreSlot = null
-                    restoreFromSlot(slotIndex)
+                    restoreFromSlot(slotIndex, allowLegacy = safeMode)
                 }) { Text(tr("Restore")) }
             },
             dismissButton = {

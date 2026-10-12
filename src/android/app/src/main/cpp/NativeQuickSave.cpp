@@ -8,6 +8,7 @@
 #include "Cafe/HW/Latte/Renderer/Renderer.h"
 #include "Cafe/TitleList/TitleId.h"
 #include "config/ActiveSettings.h"
+#include "Cemu/Logging/CemuLogging.h"
 
 #include <android/bitmap.h>
 #include <algorithm>
@@ -418,7 +419,7 @@ Java_info_cemu_cemu_nativeinterface_NativeQuickSave_quickSaveSlot([[maybe_unused
 }
 
 extern "C" [[maybe_unused]] JNIEXPORT jint JNICALL
-Java_info_cemu_cemu_nativeinterface_NativeQuickSave_quickRestoreSlot([[maybe_unused]] JNIEnv* env, [[maybe_unused]] jclass clazz, jint slot)
+Java_info_cemu_cemu_nativeinterface_NativeQuickSave_quickRestoreSlot([[maybe_unused]] JNIEnv* env, [[maybe_unused]] jclass clazz, jint slot, jint flags)
 {
 	jint result = 0;
 	JNIUtils::HandleNativeException(env, [&]() {
@@ -446,10 +447,15 @@ Java_info_cemu_cemu_nativeinterface_NativeQuickSave_quickRestoreSlot([[maybe_unu
 				result = (jint)NativeQuickSave::QUICKSAVE_OK_RESTORED_IN_PLACE;
 				return;
 			}
-			// do not silently fall back to the destructive legacy path when the
-			// state restore failed - report the failure instead
-			result = (jint)NativeQuickSave::QUICKSAVE_ERROR_STATE_RESTORE_FAILED;
-			return;
+			if ((flags & NativeQuickSave::QUICKRESTORE_FLAG_ALLOW_LEGACY) == 0)
+			{
+					// do not silently fall back to the destructive legacy path when
+					// the state restore failed - report the failure instead
+					result = (jint)NativeQuickSave::QUICKSAVE_ERROR_STATE_RESTORE_FAILED;
+					return;
+			}
+			// safe mode was requested: continue below with the legacy path
+			// (shut the title down and restore the slot save data)
 		}
 
 		const fs::path slotSaveDir = GetSlotSaveDir(titleId, slot);

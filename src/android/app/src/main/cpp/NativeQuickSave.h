@@ -19,4 +19,7 @@ namespace NativeQuickSave
 		QUICKSAVE_OK_RESTORED_IN_PLACE = 5, // state restored in-place, no relaunch needed
 		QUICKSAVE_ERROR_STATE_RESTORE_FAILED = 6, // state restore failed, title still running
 	};
+
+	// flags for quickRestoreSlot
+	constexpr jint QUICKRESTORE_FLAG_ALLOW_LEGACY = 1; // on in-place failure: shut the title down, restore the slot save data and let the caller relaunch
 }

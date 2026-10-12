@@ -19,5 +19,6 @@ void LatteAsyncCommands_queueDeleteShader(uint64 shaderBaseHash, uint64 shaderAu
 // data is re-uploaded from the current (restored) emulated memory afterwards.
 void LatteAsyncCommands_queueSaveStateGpuSync(bool unloadCaches);
 void LatteAsyncCommands_waitUntilAllProcessed();
+bool LatteAsyncCommands_waitUntilAllProcessedWithTimeout(uint32 timeoutMs);
 
 void LatteAsyncCommands_checkAndExecute();

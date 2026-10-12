@@ -1335,3 +1335,9 @@ msgstr ""
 "目标位置似乎已存在一个类型不同的已安装游戏。\n"
 "当前已安装：'{0}' 正在安装：'{1}'\n"
 "仍要继续安装吗？这将替换当前已安装的游戏。"
+
+msgid "Use safe mode"
+msgstr "使用安全模式"
+
+msgid "Safe mode: restart the game and load the saved data instead"
+msgstr "安全模式：改为重启游戏并恢复其存档数据"

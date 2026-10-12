@@ -483,15 +483,22 @@ namespace snd_core
         // loading a savestate.
         void AXOut_ResetAfterRestore()
         {
-                std::unique_lock lock(g_audioMutex);
-                // resync the frame gate: the AX pump only queues a new frame when the
-                // queued counter matches the processed counter
-                numQueuedFramesSndGeneric = numProcessedFrames;
-                // discard partially accumulated DMA frames so the next block starts
-                // on a fresh group boundary
-                tempAudioBlockCounter = 0;
-                tempDRCAudioBlockCounter = 0;
-                // hard restart of all output devices: Stop -> Flush -> Play
+                // resync the frame gate: the AX pump only queues a new frame when
+                // the queued counter matches the processed counter. This runs while
+                // the AX pump is paused (system events frozen), so no producer can
+                // race these counter resets
+                {
+                        std::unique_lock lock(g_audioMutex);
+                        numQueuedFramesSndGeneric = numProcessedFrames;
+                        // discard partially accumulated DMA frames so the next block
+                        // starts on a fresh group boundary
+                        tempAudioBlockCounter = 0;
+                        tempDRCAudioBlockCounter = 0;
+                }
+                // hard restart of all output devices: Stop -> Flush -> Play. This is
+                // intentionally done WITHOUT holding g_audioMutex: cubeb_stream_stop
+                // joins the device callback thread, and blocking on that join while
+                // holding the pump lock can deadlock the restore path
                 if (g_tvAudio)
                 {
                         g_tvAudio->Stop();

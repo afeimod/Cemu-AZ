@@ -145,6 +145,8 @@ namespace CafeSaveState
 						return false;
 				}
 
+				const auto freezeStart = std::chrono::steady_clock::now();
+				auto elapsedMs = [&freezeStart]() { return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - freezeStart).count(); };
 				m_wasPaused = CafeSystem::IsTitlePaused();
 				if (!m_wasPaused)
 				{
@@ -172,6 +174,7 @@ namespace CafeSaveState
 						return false;
 				}
 
+				LogInfo(fmt::format("freeze: threads idle ({} ms)", elapsedMs()));
 				// drain the command ring before pausing the vsync timing - a GPU thread
 				// blocked in a flip wait needs the vsync counter to keep advancing
 				if (!TCL::WaitForGPUIdle(kGpuIdleTimeoutMs))
@@ -192,8 +195,19 @@ namespace CafeSaveState
 				// commit all pending GPU work (occlusion queries, texture readbacks)
 				// into emulated memory now that the command ring is drained
 				LatteAsyncCommands_queueSaveStateGpuSync(false);
-				LatteAsyncCommands_waitUntilAllProcessed();
+				if (!LatteAsyncCommands_waitUntilAllProcessedWithTimeout(kGpuIdleTimeoutMs))
+				{
+						LogWarning("GPU thread did not process the pre-capture sync in time");
+						if (m_pausedByUs)
+						{
+								CafeSystem::ResumeTitle();
+								m_pausedByUs = false;
+						}
+						errorOut = "GPU sync timed out";
+						return false;
+				}
 
+				LogInfo(fmt::format("freeze: gpu drained + sync done ({} ms)", elapsedMs()));
 				// stop the virtual vsync timer and the OS system events (AX/alarm/NFP)
 				// so that no host thread mutates emulated memory while we work
 				LatteTiming_setPaused(true);
@@ -210,6 +224,7 @@ namespace CafeSaveState
 								LogWarning("Capture point is not an exact frame boundary");
 				}
 
+				LogInfo(fmt::format("freeze: active ({} ms)", elapsedMs()));
 				m_active = true;
 				return true;
 		}
@@ -224,8 +239,10 @@ namespace CafeSaveState
 								// drop all cached GPU data so everything is re-uploaded from the
 								// restored emulated memory
 								LatteAsyncCommands_queueSaveStateGpuSync(true);
-								LatteAsyncCommands_waitUntilAllProcessed();
+								if (!LatteAsyncCommands_waitUntilAllProcessedWithTimeout(kGpuIdleTimeoutMs))
+										LogWarning("GPU cache reset did not complete in time - continuing");
 				}
+				LogInfo("freeze: releasing timing + gpu park");
 				if (m_frozenTiming)
 				{
 						coreinit::SetSystemEventsPaused(false);
@@ -237,6 +254,7 @@ namespace CafeSaveState
 						CafeSystem::ResumeTitle();
 						m_pausedByUs = false;
 				}
+				LogInfo("freeze: emulation resumed");
 				m_active = false;
 		}
 
@@ -518,6 +536,7 @@ namespace CafeSaveState
 								}
 				}
 
+				LogInfo(fmt::format("restore: validation done ({} ranges, {} file handles)", pendingRanges.size(), fileStates.size()));
 				// everything validated - now apply the snapshot (caller holds the freeze)
 
 				for (const PendingRange& pending : pendingRanges)
@@ -563,6 +582,7 @@ namespace CafeSaveState
 								}
 				}
 
+				LogInfo("restore: memory + host state applied");
 				// resync the host-side pending flip counter with the restored emulated
 				// counters, otherwise the GPU keeps executing phantom flips and
 				// GX2WaitSwap never observes request == execute
@@ -585,6 +605,7 @@ namespace CafeSaveState
 				PPCRecompiler_invalidateRange(0x00010000, 0x10000000);
 				PPCRecompiler_invalidateRange(0xF6000000, 0xF8000000);
 
+				LogInfo("restore: scheduler rebuilt + recompiler invalidated");
 				// the host audio output must be reset after an in-place restore:
 				// stale queued blocks, partially accumulated DMA groups and a
 				// desynced frame gate would otherwise cause probabilistic silence
@@ -594,6 +615,7 @@ namespace CafeSaveState
 				// by the snapshot - re-apply all enabled cheats
 				Cheats::CheatManager::GetInstance().ReapplyAll();
 
+				LogInfo("restore: audio reset + cheats reapplied");
 				LogInfo(fmt::format("Restored state for {:016x} ({} ranges, {} file handles)",
 						expectedTitleId, pendingRanges.size(), fileStates.size()));
 

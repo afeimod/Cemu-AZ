@@ -15,6 +15,9 @@ object NativeQuickSave {
     const val RESULT_OK_RESTORED_IN_PLACE: Int = 5
     const val RESULT_ERROR_STATE_RESTORE_FAILED: Int = 6
 
+    // restore flags
+    const val RESTORE_FLAG_ALLOW_LEGACY: Int = 1
+
     @Serializable
     data class QuickSaveSlot(
         @SerialName("slot") val slot: Int,
@@ -52,7 +55,7 @@ object NativeQuickSave {
     external fun quickSaveSlot(slot: Int): Int
 
     @JvmStatic
-    external fun quickRestoreSlot(slot: Int): Int
+    external fun quickRestoreSlot(slot: Int, flags: Int): Int
 
     @JvmStatic
     external fun getQuickSaveThumbnail(slot: Int): Bitmap?

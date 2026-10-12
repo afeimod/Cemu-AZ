@@ -6,6 +6,8 @@
 #include "Cafe/HW/Latte/Core/LatteTexture.h"
 #include "Cafe/HW/Latte/Core/LatteBufferCache.h"
 #include "Cafe/HW/Latte/Core/LatteIndices.h"
+#include <chrono>
+#include <thread>
 
 void LatteThread_Exit();
 
@@ -132,6 +134,21 @@ void LatteAsyncCommands_waitUntilAllProcessed()
         {
                 _mm_pause();
         }
+}
+
+// bounded variant for the savestate paths: returns false when the GPU
+// command processor did not drain the queue within the timeout, so a
+// parked or wedged GPU thread can never hang the caller forever
+bool LatteAsyncCommands_waitUntilAllProcessedWithTimeout(uint32 timeoutMs)
+{
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+        while (LatteAsyncCommandQueue.empty() == false)
+        {
+                if (std::chrono::steady_clock::now() >= deadline)
+                        return false;
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        return true;
 }
 
 /*
