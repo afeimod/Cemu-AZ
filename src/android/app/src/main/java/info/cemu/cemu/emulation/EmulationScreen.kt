@@ -6,7 +6,6 @@ import android.content.Intent
 import android.os.Build
 import android.view.SurfaceHolder
 import android.view.SurfaceView
-import android.view.TextureView
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -250,7 +249,6 @@ fun EmulationScreen(
             emulationSettings = emulationSettings,
             mainHolderCallback = viewModel.mainHolderCallback,
             padHolderCallback = viewModel.padHolderCallback,
-            padTextureListener = viewModel.padTextureListener,
             onInitializeEmulation = viewModel::initializeEmulation,
         )
 
@@ -585,7 +583,6 @@ private fun EmulationSurfaces(
     emulationSettings: EmulationSettings?,
     mainHolderCallback: SurfaceHolder.Callback,
     padHolderCallback: SurfaceHolder.Callback,
-    padTextureListener: TextureView.SurfaceTextureListener,
     onInitializeEmulation: () -> Unit
 ) {
     if (gamePadPosition == null) {
@@ -622,7 +619,7 @@ private fun EmulationSurfaces(
             if (isPadVisible && emulationSettings != null) {
                 PadOverlaySurface(
                     settings = emulationSettings,
-                    padTextureListener = padTextureListener,
+                    padHolderCallback = padHolderCallback,
                 )
             }
         }
@@ -651,7 +648,7 @@ private fun EmulationSurfaces(
 @Composable
 private fun PadOverlaySurface(
     settings: EmulationSettings,
-    padTextureListener: TextureView.SurfaceTextureListener,
+    padHolderCallback: SurfaceHolder.Callback,
 ) {
     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
         val scale = settings.padOverlayScale.coerceIn(0.1f, 0.6f)
@@ -678,25 +675,10 @@ private fun PadOverlaySurface(
             padModifier = padModifier.blur(settings.padOverlayBlur.coerceIn(1, 24).dp)
         }
 
-        // TextureView instead of SurfaceView: the overlay needs view-layer
-        // compositing so opacity/blur actually affect the game frames (a
-        // SurfaceView is composited by SurfaceFlinger and bypasses them), and
-        // it tolerates being scaled down/overlapping without surface churn
-        AndroidView(
+        EmulationSurface(
             modifier = padModifier,
-            factory = { context ->
-                TextureView(context).apply {
-                    isOpaque = false
-                    surfaceTextureListener = padTextureListener
-                    setOnTouchListener(
-                        CanvasOnTouchListener(isTV = false) { view ->
-                            val scaleX = PAD_BUFFER_WIDTH.toFloat() / view.width.coerceAtLeast(1)
-                            val scaleY = PAD_BUFFER_HEIGHT.toFloat() / view.height.coerceAtLeast(1)
-                            Pair(scaleX, scaleY)
-                        }
-                    )
-                }
-            },
+            isTV = false,
+            holderCallback = padHolderCallback,
         )
     }
 }

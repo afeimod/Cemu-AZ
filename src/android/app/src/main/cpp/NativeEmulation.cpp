@@ -261,7 +261,10 @@ Java_info_cemu_cemu_nativeinterface_NativeEmulation_setDPI([[maybe_unused]] JNIE
 extern "C" [[maybe_unused]] JNIEXPORT void JNICALL
 Java_info_cemu_cemu_nativeinterface_NativeEmulation_clearPadSurface([[maybe_unused]] JNIEnv* env, [[maybe_unused]] jclass clazz)
 {
-	VulkanRenderer::GetInstance()->StopUsingPadAndWait();
+	// the renderer is created asynchronously and may not exist yet when
+	// an early pad surface is torn down (e.g. floating GamePad overlay)
+	if (g_renderer)
+		VulkanRenderer::GetInstance()->StopUsingPadAndWait();
 	WindowSystem::GetWindowInfo().pad_open = false;
 }
 
@@ -290,6 +293,12 @@ extern "C" [[maybe_unused]] JNIEXPORT void JNICALL
 Java_info_cemu_cemu_nativeinterface_NativeEmulation_initializeSurface(JNIEnv* env, [[maybe_unused]] jclass clazz, jboolean isMainCanvas)
 {
 	JNIUtils::HandleNativeException(env, [&]() {
+		if (!g_renderer)
+		{
+			// initializeRenderer() has not created the renderer yet; the
+			// Kotlin side retries the pad surface once it is ready
+			return;
+		}
 		int width, height;
 		if (isMainCanvas)
 		{
