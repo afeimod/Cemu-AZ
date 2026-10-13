@@ -1,4 +1,5 @@
 #include "Cafe/OS/common/OSCommon.h"
+#include "Cafe/Savestate/SavestateFnRegistry.h"
 #include "GX2_Command.h"
 #include "GX2_Event.h"
 #include "Cafe/HW/Latte/Core/LattePM4.h"
@@ -280,4 +281,8 @@ namespace GX2
             it.userData = nullptr;
         }
     }
+
+// v3.7: register GX2 event functions for the crash reporter
+SAVESTATE_REGISTER_FN(ResetQueuedEventCallbacks)
+SAVESTATE_REGISTER_FN(GX2DrawDone)
 }

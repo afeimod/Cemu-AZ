@@ -626,6 +626,9 @@ namespace coreinit
 	// scheduler
 	void OSSchedulerBegin(sint32 numCPUEmulationThreads);
 	void OSSchedulerEnd();
+	// v3.8: savestate freeze gate - while set the scheduler never starts
+	// emulated threads (see coreinit_Thread.cpp)
+	void SavestateSetSchedulerHold(bool hold);
 	bool OSIsSchedulerActive();
 
 	// internal

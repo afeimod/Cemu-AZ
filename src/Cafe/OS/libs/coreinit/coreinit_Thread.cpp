@@ -1,4 +1,5 @@
 #include "Cafe/OS/common/OSCommon.h"
+#include "Cafe/Savestate/SavestateFnRegistry.h"
 #include "Cafe/HW/Espresso/PPCCallback.h"
 #include "Cafe/OS/RPL/rpl.h"
 #include "Cafe/OS/libs/coreinit/coreinit_Thread.h"
@@ -47,6 +48,14 @@ SlimRWLock srwlock_activeThreadList;
 // savestate support: disables the host-side system events processed by the
 // scheduler idle loop while a snapshot is captured or restored
 static bool sSystemEventsPaused = false;
+
+// v3.8: scheduler freeze gate for savestates. While set, the per-core idle
+// fibers never schedule emulated threads. The savestate freeze raises it
+// after all emulated threads parked and clears it when the freeze ends, so
+// a scheduler rebuild during restore cannot start restored threads while
+// the restore tail (audio reset, cheat reapply, GPU cache reset) is still
+// running on the caller thread
+static std::atomic<bool> sSchedulerHoldForSavestate{ false };
 
 // public list of active threads
 MPTR activeThread[256];
@@ -148,6 +157,12 @@ namespace coreinit
 	void SetSystemEventsPaused(bool paused)
 	{
 		sSystemEventsPaused = paused;
+	}
+
+	// v3.8: control the savestate scheduler hold (see sSchedulerHoldForSavestate)
+	void SavestateSetSchedulerHold(bool hold)
+	{
+		sSchedulerHoldForSavestate.store(hold, std::memory_order_relaxed);
 	}
 
 	std::unordered_map<OSThread_t*, OSHostThread*> s_threadToFiber;
@@ -1377,6 +1392,15 @@ namespace coreinit
 		__OSUnlockScheduler();
 		while (true)
 		{
+			// v3.8: savestate hold - never schedule emulated threads while a
+			// snapshot capture/restore is running or finishing up
+			if (sSchedulerHoldForSavestate.load(std::memory_order_relaxed))
+			{
+				if (!sSchedulerActive.load(std::memory_order_relaxed))
+					Fiber::Switch(*t_schedulerFiber); // scheduler shut down while hold is set
+				std::this_thread::yield();
+				continue;
+			}
 			if (!g_coreRunQueueThreadCount[coreIndex].isZero()) // avoid hammering the lock on the main core if there is no runable thread
 			{
 				__OSLockScheduler();
@@ -1771,4 +1795,24 @@ namespace coreinit
 		__OSInitDefaultThreads();
 		__OSInitTerminatorThreads();
 	}
+
+        // v3.7: register scheduler/interpreter entry points for the crash reporter
+        SAVESTATE_REGISTER_FN(OSSchedulerCoreEmulationThread)
+        SAVESTATE_REGISTER_FN(__OSThreadCoreIdle)
+        SAVESTATE_REGISTER_FN(__OSThreadSwitchToNext)
+        SAVESTATE_REGISTER_FN(__OSFiberThreadEntry)
+        SAVESTATE_REGISTER_FN(__OSLoadThread)
+        SAVESTATE_REGISTER_FN(__OSStoreThread)
+        SAVESTATE_REGISTER_FN(__OSGetNextRunableThread)
+        SAVESTATE_REGISTER_FN(__OSSwitchToThreadFiber)
+        SAVESTATE_REGISTER_FN(__OSCheckSystemEvents)
+        SAVESTATE_REGISTER_FN(SavestateRebuildSchedulerAfterRestore)
+        SAVESTATE_REGISTER_FN(__OSAddReadyThreadToRunQueue)
+        SAVESTATE_REGISTER_FN(__OSResumeThreadInternal)
+        SAVESTATE_REGISTER_FN(__OSActivateThread)
+        SAVESTATE_REGISTER_FN(__OSDeactivateThread)
+        SAVESTATE_REGISTER_FN(threadEntry)
+        SAVESTATE_REGISTER_FN(__OSThreadLoadContext)
+        SAVESTATE_REGISTER_FN(__OSThreadStoreContext)
+        SAVESTATE_REGISTER_FN(OSGetCurrentThread)
 }

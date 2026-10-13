@@ -1,4 +1,5 @@
 #include "Cafe/OS/common/OSCommon.h"
+#include "Cafe/Savestate/SavestateFnRegistry.h"
 #include "Cafe/OS/libs/coreinit/coreinit_MessageQueue.h"
 
 namespace coreinit
@@ -135,5 +136,9 @@ namespace coreinit
 		cafeExportRegister("coreinit", OSSendMessage, LogType::CoreinitThread);
 		cafeExportRegister("coreinit", OSGetSystemMessageQueue, LogType::CoreinitThread);
 	}
+	// v3.7: register message queue functions for the crash reporter
+	SAVESTATE_REGISTER_FN(OSSendMessage)
+	SAVESTATE_REGISTER_FN(OSReceiveMessage)
+
 };
 

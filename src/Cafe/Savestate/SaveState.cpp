@@ -39,6 +39,7 @@
 #include <dlfcn.h>
 #include <sys/prctl.h>
 #include <ucontext.h>
+#include <fcntl.h>
 #endif
 #include "Cafe/Savestate/SavestateFnRegistry.h"
 
@@ -120,6 +121,122 @@ namespace
                 // v3.7: module base captured when the reporter is armed, used to print
                 // module-relative PCs which stay comparable across runs despite ASLR
                 void* g_moduleBaseForSymbols = nullptr;
+
+                                // v3.8: exclusive end of the emulator module mapping, resolved once when
+                                // the reporter is armed so the fault handler never needs dladdr
+                                // (dladdr fails for PCs in the JIT cache or other anonymous mappings)
+                                uint64 g_moduleEndForSymbols = 0;
+
+                                static uint32 SavestateHexVal(char c)
+                                {
+                                                if (c >= '0' && c <= '9') return (uint32)(c - '0');
+                                                if (c >= 'a' && c <= 'f') return (uint32)(c - 'a' + 10);
+                                                if (c >= 'A' && c <= 'F') return (uint32)(c - 'A' + 10);
+                                                return 0xFFFFFFFFu;
+                                }
+
+                                // parse "start-end perms offset dev inode path" - path is optional
+                                static bool SavestateParseMapsLine(const char* line, uint64& startOut, uint64& endOut, char* pathOut, size_t pathCap)
+                                {
+                                                uint64 start = 0, end = 0;
+                                                const char* p = line;
+                                                while (*p && *p != '-') { uint32 v = SavestateHexVal(*p); if (v == 0xFFFFFFFFu) return false; start = start * 16ull + (uint64)v; ++p; }
+                                                if (*p != '-') return false;
+                                                ++p;
+                                                while (*p && *p != ' ') { uint32 v = SavestateHexVal(*p); if (v == 0xFFFFFFFFu) return false; end = end * 16ull + (uint64)v; ++p; }
+                                                if (end <= start) return false;
+                                                startOut = start;
+                                                endOut = end;
+                                                if (pathOut && pathCap)
+                                                {
+                                                                pathOut[0] = '\0';
+                                                                int spaces = 0;
+                                                                const char* path = nullptr;
+                                                                for (const char* q = line; *q; ++q)
+                                                                {
+                                                                                if (*q == ' ')
+                                                                                {
+                                                                                                ++spaces;
+                                                                                                if (spaces == 5)
+                                                                                                {
+                                                                                                                path = q + 1;
+                                                                                                                while (*path == ' ') ++path; // maps pads the pathname with extra spaces
+                                                                                                                break;
+                                                                                                }
+                                                                                }
+                                                                }
+                                                                if (path && *path)
+                                                                {
+                                                                                size_t i = 0;
+                                                                                while (path[i] && i + 1 < pathCap) { pathOut[i] = path[i]; ++i; }
+                                                                                pathOut[i] = '\0';
+                                                                }
+                                                }
+                                                return true;
+                                }
+
+                                // armed-time (normal context) module span lookup via stdio
+                                static uint64 SavestateFindMappingEnd(uint64 addr)
+                                {
+                                                FILE* f = fopen("/proc/self/maps", "r");
+                                                if (!f) return 0;
+                                                char line[1024];
+                                                char refPath[256];
+                                                refPath[0] = '\0';
+                                                bool haveRef = false;
+                                                uint64 bestEnd = 0;
+                                                while (fgets(line, sizeof(line), f))
+                                                {
+                                                                uint64 start = 0, end = 0;
+                                                                char path[256];
+                                                                if (!SavestateParseMapsLine(line, start, end, path, sizeof(path))) continue;
+                                                                if (path[0] == '\0') continue;
+                                                                if (!haveRef && addr >= start && addr < end)
+                                                                {
+                                                                                strncpy(refPath, path, sizeof(refPath) - 1);
+                                                                                refPath[sizeof(refPath) - 1] = '\0';
+                                                                                haveRef = true;
+                                                                }
+                                                                if (haveRef && strcmp(path, refPath) == 0)
+                                                                                bestEnd = end;
+                                                }
+                                                fclose(f);
+                                                return bestEnd;
+                                }
+
+                                // fault-time (signal context) mapping classification using only
+                                // open/read/close - prints the maps line which contains addr
+                                static void SavestateLogMappingForAddr(uint64 addr, const char* label)
+                                {
+                                                int fd = open("/proc/self/maps", O_RDONLY);
+                                                if (fd < 0) return;
+                                                static char rb[8192];
+                                                static char line[1200];
+                                                size_t lineLen = 0;
+                                                bool found = false;
+                                                while (!found)
+                                                {
+                                                                ssize_t n = read(fd, rb, sizeof(rb));
+                                                                if (n <= 0) break;
+                                                                for (ssize_t i = 0; i < n && !found; ++i)
+                                                                {
+                                                                                char c = rb[i];
+                                                                                if (c != '\n' && lineLen + 1 < sizeof(line)) { line[lineLen++] = c; continue; }
+                                                                                if (c != '\n') continue; // line too long, skip remainder
+                                                                                line[lineLen] = '\0';
+                                                                                lineLen = 0;
+                                                                                uint64 start = 0, end = 0;
+                                                                                if (SavestateParseMapsLine(line, start, end, nullptr, 0) && addr >= start && addr < end)
+                                                                                {
+                                                                                                __android_log_print(ANDROID_LOG_ERROR, "CemuSaveState", "%s %llx is in mapping: %s", label, (unsigned long long)addr, line);
+                                                                                                found = true;
+                                                                                }
+                                                                }
+                                                }
+                                                if (!found)
+                                                                __android_log_print(ANDROID_LOG_ERROR, "CemuSaveState", "%s %llx has no /proc/self/maps entry", label, (unsigned long long)addr);
+                                                close(fd);
+                                }
                 
                 void SaveStateFatalSignalHandler(int sig, siginfo_t* info, void* uctx)
                 {
@@ -144,23 +261,34 @@ namespace
                                 }
                                 #endif
                                 const uint64 symBase = (uint64)(uintptr_t)g_moduleBaseForSymbols;
-                                // offsets above this are by definition other mappings (the emulator module
-                                // is a few dozen MB) - they get no registry lookup
-                                constexpr uint64 kModuleOffsetCap = 0x20000000ULL;
+                                // v3.8: prefer the module span resolved at arm time; fall back to a
+                                // generous cap when the end could not be determined
+                                const uint64 moduleSpan = (g_moduleEndForSymbols > symBase) ? (g_moduleEndForSymbols - symBase) : 0x20000000ULL;
                                 auto relOf = [symBase](uint64 addr) -> long long
                                 {
                                     return (symBase != 0 && addr >= symBase) ? (long long)(addr - symBase) : -1LL;
+                                };
+                                auto inModule = [symBase, moduleSpan](uint64 addr) -> bool
+                                {
+                                    return symBase != 0 && addr >= symBase && (addr - symBase) < moduleSpan;
                                 };
                                 __android_log_print(ANDROID_LOG_ERROR, "CemuSaveState",
                                                     "fault pc %p (lib+%llx) lr %p (lib+%llx) sp %p",
                                                     (void*)pcAbs, (unsigned long long)relOf(pcAbs),
                                                     (void*)lrAbs, (unsigned long long)relOf(lrAbs), (void*)spAbs);
-                                if (pcAbs >= symBase && symBase != 0 && (pcAbs - symBase) < kModuleOffsetCap)
+                                if (inModule(pcAbs))
                                 {
                                     uint64 fnDelta = 0;
                                     const char* fnName = savestate_fsym::FindNearest(pcAbs - symBase, symBase, fnDelta);
                                     __android_log_print(ANDROID_LOG_ERROR, "CemuSaveState", "fault pc in function: %s+%llu",
                                                         fnName ? fnName : "<not registered>", (unsigned long long)fnDelta);
+                                }
+                                else
+                                {
+                                    // v3.8: the PC is outside the emulator module (JIT cache, heap,
+                                    // system library ...) - print the owning /proc/self/maps line so
+                                    // the log is conclusive even without symbols
+                                    SavestateLogMappingForAddr(pcAbs, "fault pc");
                                 }
                                 #if defined(__aarch64__)
                                 if (uc)
@@ -197,7 +325,7 @@ namespace
                                 for (uint32 i = 0; i < bt.count; ++i)
                                 {
                                     const uint64 pc = (uint64)(uintptr_t)bt.pcs[i];
-                                    if (pc >= symBase && symBase != 0 && (pc - symBase) < kModuleOffsetCap)
+                                    if (inModule(pc))
                                     {
                                         uint64 fnDelta = 0;
                                         const char* fnName = savestate_fsym::FindNearest(pc - symBase, symBase, fnDelta);
@@ -229,7 +357,14 @@ namespace
                                         sigaction(sigs[i], &sa, nullptr);
                                 Dl_info info{};
                                 if (dladdr((void*)&InstallSaveStateCrashReporter, &info) && info.dli_fbase)
-                                        __android_log_print(ANDROID_LOG_INFO, "CemuSaveState", "crash tripwire armed (module base %p)", info.dli_fbase);
+                                {
+                                                // v3.8 fix: store the module base. v3.7 only printed it, so the
+                                                // fault handler ran with a null base: no offsets, no function
+                                                // names, every frame reported as "(outside module)"
+                                                g_moduleBaseForSymbols = info.dli_fbase;
+                                                g_moduleEndForSymbols = SavestateFindMappingEnd((uint64)(uintptr_t)info.dli_fbase);
+                                                __android_log_print(ANDROID_LOG_INFO, "CemuSaveState", "crash tripwire armed (module base %p end %llx)", info.dli_fbase, (unsigned long long)g_moduleEndForSymbols);
+                                }
                                 else
                                         __android_log_print(ANDROID_LOG_INFO, "CemuSaveState", "crash tripwire armed");
                 }
@@ -688,6 +823,12 @@ namespace CafeSaveState
                                 }
 
                                 LogInfo(fmt::format("freeze: threads idle ({} ms)", elapsedMs()));
+                                // v3.8: from this point no emulated thread may be scheduled until the
+                                // freeze is fully released. The scheduler rebuild during a restore
+                                // re-adds ready threads to the run queues, which would otherwise let
+                                // the idle fibers execute restored threads while the restore tail
+                                // (audio reset, cheat reapply, GPU cache reset) is still running
+                                coreinit::SavestateSetSchedulerHold(true);
                                 // freeze the FSA IO thread before anything else touches emulated memory.
                                 // FSA reads/writes copy file data into and out of emulated buffers on a
                                 // dedicated host thread - without this gate a file request finishing
@@ -803,6 +944,10 @@ namespace CafeSaveState
                                                 LatteTiming_setPaused(false);
                                                 m_frozenTiming = false;
                                 }
+                                // v3.8: release the scheduler hold after timing/system events are
+                                // running again but before the title is resumed - the entire restore
+                                // tail above ran with zero emulated threads scheduled
+                                coreinit::SavestateSetSchedulerHold(false);
                                 if (m_pausedByUs)
                                 {
                                                 CafeSystem::ResumeTitle();

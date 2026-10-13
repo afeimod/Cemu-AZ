@@ -1,4 +1,5 @@
 #include "PPCInterpreterInternal.h"
+#include "Cafe/Savestate/SavestateFnRegistry.h"
 #include "PPCInterpreterHelper.h"
 #include "Cafe/HW/Espresso/Debugger/Debugger.h"
 #include "Cafe/HW/Espresso/Debugger/GDBStub.h"
@@ -1263,3 +1264,6 @@ void PPCInterpreterFull_executeInstruction(PPCInterpreter_t* hCPU)
 {
 	PPCInterpreterContainer<PPCItpSupervisorWithMMU>::executeInstruction(hCPU);
 }
+
+// v3.7: register interpreter entry points for the crash reporter
+SAVESTATE_REGISTER_FN(PPCInterpreterSlim_executeInstruction)

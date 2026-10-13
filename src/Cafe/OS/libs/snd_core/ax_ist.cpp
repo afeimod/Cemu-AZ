@@ -6,6 +6,10 @@
 #include "Cafe/OS/libs/coreinit/coreinit_Thread.h"
 #include "Cafe/OS/libs/coreinit/coreinit_MessageQueue.h"
 
+#ifdef __ANDROID__
+#include <android/log.h>
+#endif
+
 namespace snd_core
 {
 	sint32 __AXDeviceUpsampleStage[AX_DEV_COUNT]; // AX_UPSAMPLE_STAGE_*
@@ -1067,6 +1071,11 @@ namespace snd_core
 		while (coreinit::OSReceiveMessage(__AXIstThreadMsgQueue.GetPtr(), msg, 0))
 			drainedCount++;
 		__AXIstIsProcessingFrame.store(false);
+		// v3.8: mirror to the CemuSaveState logcat tag so the drain count is
+		// visible when filtering logcat by that tag (cemuLog uses another tag)
+		#ifdef __ANDROID__
+		__android_log_print(ANDROID_LOG_INFO, "CemuSaveState", "[SaveState] AX IST drain: dropped %d stale frame message(s)", (int)drainedCount);
+		#endif
 		cemuLog_log(LogType::Force, "AX IST drain: dropped {} stale frame message(s)", drainedCount);
 	}
 

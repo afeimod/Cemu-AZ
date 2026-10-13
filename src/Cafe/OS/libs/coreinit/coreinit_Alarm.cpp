@@ -1,4 +1,5 @@
 #include "Cafe/OS/common/OSCommon.h"
+#include "Cafe/Savestate/SavestateFnRegistry.h"
 #include "Cafe/HW/Espresso/PPCCallback.h"
 #include "Cafe/OS/libs/coreinit/coreinit_Thread.h"
 #include "Cafe/OS/libs/coreinit/coreinit_Time.h"
@@ -453,4 +454,13 @@ namespace coreinit
 		strcpy(_g_alarmThreadName.GetPtr(), "Alarm Thread");
 		coreinit::OSSetThreadName(g_alarmThread.GetPtr(), _g_alarmThreadName.GetPtr());
 	}
+
+        // v3.7: register alarm functions for the crash reporter
+        SAVESTATE_REGISTER_FN(alarm_update)
+        SAVESTATE_REGISTER_FN(__OSHostAlarmTriggered)
+        SAVESTATE_REGISTER_FN(_OSAlarmThread)
+        SAVESTATE_REGISTER_FN(SavestateCaptureAlarms)
+        SAVESTATE_REGISTER_FN(SavestateRestoreAlarms)
+        SAVESTATE_REGISTER_FN(__OSInitiateAlarm)
+        SAVESTATE_REGISTER_FN(OSCancelAlarm)
 }

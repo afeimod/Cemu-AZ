@@ -1,4 +1,5 @@
 #include "Cafe/OS/common/OSCommon.h"
+#include "Cafe/Savestate/SavestateFnRegistry.h"
 #include "Cafe/HW/Espresso/PPCCallback.h"
 #include "Cafe/OS/libs/nn_common.h"
 #include "nn_nfp.h"
@@ -1064,3 +1065,6 @@ namespace nn::nfp
 		return &s_COSnnNfpModule;
 	}
 }
+
+// v3.7: register nfp update for the crash reporter
+SAVESTATE_REGISTER_FN(nnNfp_update)
