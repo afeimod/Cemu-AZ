@@ -957,6 +957,7 @@ namespace iosu
 					if (r != IOS_ERROR_OK)
 					{
 						IOS_ResourceReply(cmd, r);
+						sIoRequestProcessing.store(false, std::memory_order_release);
 						continue;
 					}
 					IOS_ResourceReply(cmd, (IOS_ERROR)clientIndex);

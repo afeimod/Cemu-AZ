@@ -23,6 +23,19 @@
 #include <fstream>
 #include <thread>
 #include <vector>
+#include <atomic>
+#include <cstdarg>
+#include <cstdio>
+#include <exception>
+#include <cstring>
+#if defined(__ANDROID__) || defined(__linux__)
+#include <sys/mman.h>
+#include <unistd.h>
+#endif
+#ifdef __ANDROID__
+#include <android/log.h>
+#include <signal.h>
+#endif
 
 namespace fs = std::filesystem;
 
@@ -71,14 +84,85 @@ namespace
 		};
 		static_assert(sizeof(RangeHeader) == 8);
 
+		// ---------------------------------------------------------------------------
+		// v3.3 diagnostics: cemuLog is not wired into the Android logcat buffer, so
+		// the whole save/load path used to be invisible there. Mirror every savestate
+		// log line to logcat under the dedicated "CemuSaveState" tag, track the
+		// current operation phase and install a fatal-signal tripwire while a
+		// capture/restore runs - a crash now reports exactly which step died
+		#ifdef __ANDROID__
+		void LogCatLine(const char* msg)
+		{
+				__android_log_print(ANDROID_LOG_INFO, "CemuSaveState", "%s", msg);
+		}
+		#else
+		inline void LogCatLine(const char*) {}
+		#endif
+
+		#ifdef __ANDROID__
+		std::atomic<const char*> g_saveStatePhase{ "init" };
+		char g_phaseText[256];
+		void SetPhase(const char* fmt, ...)
+		{
+				va_list args;
+				va_start(args, fmt);
+				vsnprintf(g_phaseText, sizeof(g_phaseText), fmt, args);
+				va_end(args);
+				g_saveStatePhase.store(g_phaseText, std::memory_order_release);
+		}
+		// async-signal-safe enough for a crash reporter: logcat write + re-raise so
+		// the system still generates the regular tombstone
+		void SaveStateFatalSignalHandler(int sig, siginfo_t* info, void*)
+		{
+				__android_log_print(ANDROID_LOG_ERROR, "CemuSaveState",
+						"!!! FATAL SIGNAL %d (fault addr %p) during: %s", sig,
+						info ? info->si_addr : nullptr,
+						g_saveStatePhase.load(std::memory_order_seq_cst));
+				signal(sig, SIG_DFL);
+				raise(sig);
+		}
+		class SaveStateSignalGuard
+		{
+		  public:
+				SaveStateSignalGuard()
+				{
+						const int sigs[] = { SIGSEGV, SIGBUS, SIGABRT, SIGFPE, SIGILL };
+						struct sigaction sa {};
+						sa.sa_sigaction = &SaveStateFatalSignalHandler;
+						sa.sa_flags = SA_SIGINFO;
+						for (size_t i = 0; i < sizeof(sigs) / sizeof(sigs[0]); ++i)
+								m_installed[i] = sigaction(sigs[i], &sa, &m_old[i]) == 0;
+				}
+				~SaveStateSignalGuard()
+				{
+						const int sigs[] = { SIGSEGV, SIGBUS, SIGABRT, SIGFPE, SIGILL };
+						for (size_t i = 0; i < sizeof(sigs) / sizeof(sigs[0]); ++i)
+						{
+								if (m_installed[i])
+										sigaction(sigs[i], &m_old[i], nullptr);
+						}
+				}
+				SaveStateSignalGuard(const SaveStateSignalGuard&) = delete;
+				SaveStateSignalGuard& operator=(const SaveStateSignalGuard&) = delete;
+		  private:
+				struct sigaction m_old[5]{};
+				bool m_installed[5]{};
+		};
+		#else
+		inline void SetPhase(const char*, ...) {}
+		class SaveStateSignalGuard {};
+		#endif
+		
 		void LogInfo(std::string_view msg)
 		{
 				cemuLog_log(LogType::Force, "[SaveState] {}", msg);
+				LogCatLine(fmt::format("[SaveState] {}", msg).c_str());
 		}
 
 		void LogWarning(std::string_view msg)
 		{
 				cemuLog_log(LogType::Force, "[SaveState] WARNING: {}", msg);
+				LogCatLine(fmt::format("[SaveState] WARNING: {}", msg).c_str());
 		}
 
 		// true when no emulated thread is still executing (all register contexts
@@ -177,40 +261,170 @@ namespace
 				return true;
 		}
 
-		// streaming zstd decompression directly into the target emulated memory
-		// range - no host-sized intermediate buffer is allocated
+		// ---------------------------------------------------------------------------
+		// v3.3 restore memory optimization: applying a snapshot used to write every
+		// byte of the ~1.4 GB snapshot into emulated memory, forcing ALL of those
+		// pages to become resident at once. On low-RAM Android devices the emulator
+		// process (already holding ~1 GB from the running game) crossed the system
+		// memory kill threshold mid-restore and was OOM-killed (SIGKILL - no crash
+		// dump, the process just dies while loading, logcat shows only "has died").
+		//
+		// Fix: most snapshot pages are all-zero (this is why zstd compresses the
+		// snapshot so well). Emulated memory is mapped MAP_PRIVATE|MAP_ANONYMOUS,
+		// so untouched pages read as zero. Instead of writing zero pages we
+		// decommit them with madvise(MADV_DONTNEED) - the content is identical,
+		// but the resident footprint of the restored snapshot drops by the
+		// snapshot zero-page ratio (typically 60-80%)
+#if defined(__ANDROID__) || defined(__linux__)
+		// kernel page size (madvise() requires page-aligned addresses)
+		const size_t kApplyPageSize = []() -> size_t
+		{
+			const long v = sysconf(_SC_PAGESIZE);
+			return v > 0 ? (size_t)v : (size_t)4096;
+		}();
+
+		bool IsZeroPage(const uint8* p)
+		{
+			const uint64* q = (const uint64*)p;
+			for (size_t i = 0; i < kApplyPageSize / sizeof(uint64); ++i)
+			{
+				if (q[i] != 0)
+					return false;
+			}
+			return true;
+		}
+
+		// writes one buffer of decoded data into emulated memory. runs of
+		// all-zero kernel pages are decommitted instead of written, everything
+		// else is copied. runs are batched to keep the syscall count low
+		void ApplyMemoryChunk(void* dst, const uint8* src, size_t len)
+		{
+			uint8* d = (uint8*)dst;
+			size_t off = 0;
+			while (off < len)
+			{
+				const size_t left = len - off;
+				if (left >= kApplyPageSize && IsZeroPage(src + off))
+				{
+					size_t run = kApplyPageSize;
+					while (run + kApplyPageSize <= left && IsZeroPage(src + off + run))
+						run += kApplyPageSize;
+					// if the kernel ever refuses (unaligned/foreign mapping) the
+					// content must still be zero - write it explicitly
+					if (madvise(d + off, run, MADV_DONTNEED) != 0)
+						memset(d + off, 0, run);
+					off += run;
+				}
+				else
+				{
+					size_t copyLen = std::min<size_t>(left, kApplyPageSize);
+					while (copyLen + kApplyPageSize <= left && !IsZeroPage(src + off + copyLen))
+						copyLen += kApplyPageSize;
+					memcpy(d + off, src + off, copyLen);
+					off += copyLen;
+				}
+			}
+		}
+#ifdef __ANDROID__
+		// resident set size of this process in MB - traces the restore memory
+		// footprint in logcat (tag CemuSaveState)
+		uint32 GetCurrentRssMB()
+		{
+			FILE* f = fopen("/proc/self/statm", "rb");
+			if (!f)
+				return 0;
+			unsigned long totalPages = 0, residentPages = 0;
+			const int scanned = fscanf(f, "%lu %lu", &totalPages, &residentPages);
+			fclose(f);
+			if (scanned != 2)
+				return 0;
+			return (uint32)((residentPages * (unsigned long)kApplyPageSize) / (1024ul * 1024ul));
+		}
+#endif
+#else
+		void ApplyMemoryChunk(void* dst, const uint8* src, size_t len)
+		{
+			memcpy(dst, src, len);
+		}
+#endif
+
+		// streaming zstd decompression into the target emulated memory range.
+		// output is drained in bounded 1 MB chunks which are applied through
+		// ApplyMemoryChunk (zero pages are decommitted, see above) - no
+		// host-sized buffer for the whole range is ever allocated
 		bool ReadCompressedRange(std::ifstream& in, void* dest, uint32 uncompressedSize, uint32 compressedSize)
 		{
-				ZSTD_DCtx* dctx = ZSTD_createDCtx();
-				if (!dctx)
-						return false;
-				ZSTD_outBuffer out{ dest, uncompressedSize, 0 };
-				constexpr size_t kChunkSize = 256 * 1024;
-				std::vector<uint8> inChunk(kChunkSize);
-				uint64 remaining = compressedSize;
-				while (out.pos < out.size && remaining > 0)
+			ZSTD_DCtx* dctx = ZSTD_createDCtx();
+			if (!dctx)
+				return false;
+			constexpr size_t kInChunkSize = 256 * 1024;
+			constexpr size_t kOutChunkSize = 1024 * 1024;
+			std::vector<uint8> inChunk(kInChunkSize);
+			std::vector<uint8> outChunk(kOutChunkSize);
+			uint64 inRemaining = compressedSize;
+			uint64 outTotal = 0;
+			bool frameDone = false;
+			while (!frameDone && inRemaining > 0)
+			{
+				const uint32 toRead = (uint32)std::min<uint64>(kInChunkSize, inRemaining);
+				in.read((char*)inChunk.data(), toRead);
+				if (!in)
 				{
-						const uint32 toRead = (uint32)std::min<uint64>(kChunkSize, remaining);
-						in.read((char*)inChunk.data(), toRead);
-						if (!in)
-						{
-								ZSTD_freeDCtx(dctx);
-								return false;
-						}
-						remaining -= toRead;
-						ZSTD_inBuffer inDesc{ inChunk.data(), toRead, 0 };
-						while (inDesc.pos < inDesc.size && out.pos < out.size)
-						{
-								const size_t r = ZSTD_decompressStream(dctx, &out, &inDesc);
-								if (ZSTD_isError(r))
-								{
-										ZSTD_freeDCtx(dctx);
-										return false;
-								}
-						}
+					ZSTD_freeDCtx(dctx);
+					return false;
 				}
-				ZSTD_freeDCtx(dctx);
-				return out.pos == out.size && remaining == 0;
+				inRemaining -= toRead;
+				ZSTD_inBuffer inDesc{ inChunk.data(), toRead, 0 };
+				while (inDesc.pos < inDesc.size)
+				{
+					ZSTD_outBuffer outDesc{ outChunk.data(), outChunk.size(), 0 };
+					const size_t r = ZSTD_decompressStream(dctx, &outDesc, &inDesc);
+					if (ZSTD_isError(r))
+					{
+						ZSTD_freeDCtx(dctx);
+						return false;
+					}
+					// defense in depth: the scan phase already verified that the
+					// frame decodes to exactly uncompressedSize, but never write
+					// past the end of the destination range
+					if (outTotal > (uint64)uncompressedSize || outDesc.pos > (uint64)uncompressedSize - outTotal)
+					{
+						ZSTD_freeDCtx(dctx);
+						return false;
+					}
+					ApplyMemoryChunk((uint8*)dest + outTotal, outChunk.data(), outDesc.pos);
+					outTotal += outDesc.pos;
+					if (r == 0)
+					{
+						frameDone = true;
+						break;
+					}
+				}
+			}
+			ZSTD_freeDCtx(dctx);
+			return frameDone && inRemaining == 0 && outTotal == (uint64)uncompressedSize;
+		}
+
+		// applies a raw (uncompressed, version 1/2) memory payload in bounded
+		// chunks through ApplyMemoryChunk so zero pages of legacy snapshots are
+		// decommitted here as well instead of ballooning the resident footprint
+		bool ReadRawRange(std::ifstream& in, void* dest, uint32 size)
+		{
+			constexpr size_t kRawChunkSize = 1024 * 1024;
+			std::vector<uint8> chunk(kRawChunkSize);
+			uint64 remaining = size;
+			uint8* dst = (uint8*)dest;
+			while (remaining > 0)
+			{
+				const uint32 toRead = (uint32)std::min<uint64>(kRawChunkSize, remaining);
+				in.read((char*)chunk.data(), toRead);
+				if (!in)
+					return false;
+				ApplyMemoryChunk(dst, chunk.data(), toRead);
+				dst += toRead;
+				remaining -= toRead;
+			}
+			return true;
 		}
 
 		// pre-validate a compressed payload without touching emulated memory:
@@ -362,12 +576,14 @@ namespace CafeSaveState
 				m_wasPaused = CafeSystem::IsTitlePaused();
 				if (!m_wasPaused)
 				{
+						SetPhase("freeze: pausing title");
 						CafeSystem::PauseTitle();
 						m_pausedByUs = true;
 				}
 
 				// wait until every suspended PPC thread has finished its current
 				// timeslice and stored its registers into emulated memory
+				SetPhase("freeze: waiting for threads idle");
 				const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kThreadsIdleTimeoutMs);
 				while (std::chrono::steady_clock::now() < deadline)
 				{
@@ -392,11 +608,13 @@ namespace CafeSaveState
 				// dedicated host thread - without this gate a file request finishing
 				// during the capture/restore leaves the state torn (probabilistic freeze
 				// or corrupted save files after an in-place restore)
+				SetPhase("freeze: engaging FSA gate");
 				iosu::fsa::SavestateSetFrozen(true);
 				if (!iosu::fsa::SavestateWaitIdle(kFsaIdleTimeoutMs))
 						LogWarning("FSA IO thread did not become idle in time - continuing");
 				// drain the command ring before pausing the vsync timing - a GPU thread
 				// blocked in a flip wait needs the vsync counter to keep advancing
+				SetPhase("freeze: waiting for gpu idle");
 				if (!TCL::WaitForGPUIdle(kGpuIdleTimeoutMs))
 				{
 								if (gpuIdleRequired)
@@ -414,6 +632,7 @@ namespace CafeSaveState
 
 				// commit all pending GPU work (occlusion queries, texture readbacks)
 				// into emulated memory now that the command ring is drained
+				SetPhase("freeze: gpu sync");
 				LatteAsyncCommands_queueSaveStateGpuSync(false);
 				if (!LatteAsyncCommands_waitUntilAllProcessedWithTimeout(kGpuIdleTimeoutMs))
 				{
@@ -430,6 +649,7 @@ namespace CafeSaveState
 				LogInfo(fmt::format("freeze: gpu drained + sync done ({} ms)", elapsedMs()));
 				// stop the virtual vsync timer and the OS system events (AX/alarm/NFP)
 				// so that no host thread mutates emulated memory while we work
+				SetPhase("freeze: pausing timing + system events");
 				LatteTiming_setPaused(true);
 				coreinit::SetSystemEventsPaused(true);
 				m_frozenTiming = true;
@@ -443,6 +663,7 @@ namespace CafeSaveState
 				// counters for a few more iterations. Give it time to finish, then
 				// re-verify that the capture point is stable - this closes the TOCTOU
 				// window between the pause flags and the actual snapshot copy
+				SetPhase("freeze: settle window");
 				std::this_thread::sleep_for(std::chrono::milliseconds(kSettleWindowMs));
 				if (!IsAtSafeGpuPoint())
 				{
@@ -458,6 +679,7 @@ namespace CafeSaveState
 		void EmulationFreeze::end()
 		{
 				// let the GPU thread continue first so it can process the cache reset
+				SetPhase("freeze: releasing gpu park");
 				g_savestateFreezeGpuThread.store(false);
 				if (m_resetGpuCaches)
 				{
@@ -471,7 +693,9 @@ namespace CafeSaveState
 				LogInfo("freeze: releasing timing + gpu park");
 				// let the FSA IO thread process file requests again before any emulated
 				// thread is resumed
+				SetPhase("freeze: releasing FSA gate");
 				iosu::fsa::SavestateSetFrozen(false);
+				SetPhase("freeze: resuming timing + system events");
 				if (m_frozenTiming)
 				{
 						coreinit::SetSystemEventsPaused(false);
@@ -521,6 +745,7 @@ namespace CafeSaveState
 				iosu::fsa::FSACollectOpenFileStates(fileStates);
 
 				SaveStateHeader header{};
+				SetPhase("capture: writing header");
 				header.magic = kStateMagic;
 				header.version = kStateVersion;
 				header.titleId = titleId;
@@ -535,6 +760,8 @@ namespace CafeSaveState
 				uint64 totalBytes = sizeof(header);
 				for (const MMURange* range : ranges)
 				{
+						SetPhase("capture: compress range base=%08x size=%u",
+										(unsigned)range->getBase(), (unsigned)range->getSize());
 						RangeHeader rangeHeader{ range->getBase(), range->getSize() };
 						out.write((const char*)&rangeHeader, sizeof(rangeHeader));
 						// version 3: compress the payload with zstd (level 3). Emulated memory is
@@ -571,6 +798,7 @@ namespace CafeSaveState
 						totalBytes += sizeof(rangeHeader) + sizeof(compressedSize) + written;
 				}
 
+				SetPhase("capture: writing file table");
 				for (const iosu::fsa::FSAFileStateEntry& entry : fileStates)
 				{
 						const uint32 pathLength = (uint32)entry.path.size();
@@ -597,6 +825,7 @@ namespace CafeSaveState
 
 				// host-side state (AX voice lists/callbacks, alarm registry) which is
 				// not part of emulated memory
+				SetPhase("capture: writing host blob");
 				std::vector<uint8> hostBlob;
 				AppendHostStateSections(hostBlob);
 				const uint32 hostBlobSize = (uint32)hostBlob.size();
@@ -615,6 +844,7 @@ namespace CafeSaveState
 
 				// move the finished snapshot into place (removes any old state file)
 				fs::remove(filePath, ec);
+				SetPhase("capture: finalizing (rename)");
 				fs::rename(tmpPath, filePath, ec);
 				if (ec)
 				{
@@ -664,6 +894,14 @@ namespace CafeSaveState
 						return result;
 				}
 
+				SetPhase("restore: reading header");
+				if (header.rangeCount > 64 || header.fsEntryCount > 4096)
+				{
+								result.errorMessage = "State file has an implausible range or file handle count";
+								return result;
+				}
+				LogInfo(fmt::format("restore: header ok (version {}, {} ranges, {} handles, flags {:08x})",
+								header.version, header.rangeCount, header.fsEntryCount, header.flags));
 				struct PendingRange
 				{
 						uint32 baseAddress;
@@ -713,6 +951,9 @@ namespace CafeSaveState
 						PendingRange pending;
 						pending.baseAddress = rangeHeader.baseAddress;
 						pending.size = rangeHeader.size;
+						SetPhase("scan range %u/%u base=%08x size=%u", (unsigned)(i + 1),
+								(unsigned)header.rangeCount, (unsigned)rangeHeader.baseAddress,
+								(unsigned)rangeHeader.size);
 						if (compressedRanges)
 						{
 								// the position currently holds either the compressed size (correct
@@ -733,6 +974,8 @@ namespace CafeSaveState
 										// there before decoding
 										in.seekg((std::streamoff)pending.fileOffset, std::ios::beg);
 										uint32 legacySize = 0;
+										SetPhase("legacy-scan range base=%08x size=%u",
+																		(unsigned)rangeHeader.baseAddress, (unsigned)pending.size);
 										if (!SkipLegacyCompressedRange(in, pending.size, legacySize))
 										{
 												result.errorMessage = "State file is corrupted (legacy compressed payload)";
@@ -757,6 +1000,9 @@ namespace CafeSaveState
 										// (discarding the output) - a corrupt or mismatched frame is
 										// rejected before the apply phase overwrites emulation memory.
 										// on success the stream is positioned at the end of the payload
+										SetPhase("validate range base=%08x size=%u comp=%u",
+																		(unsigned)rangeHeader.baseAddress, (unsigned)pending.size,
+																		(unsigned)compressedSize);
 										if (!ValidateCompressedRange(in, pending.size, compressedSize))
 										{
 												result.errorMessage = fmt::format("Memory range {:08x} has a corrupted compressed payload", rangeHeader.baseAddress);
@@ -852,6 +1098,9 @@ namespace CafeSaveState
 				}
 
 				LogInfo(fmt::format("restore: validation done ({} ranges, {} file handles)", pendingRanges.size(), fileStates.size()));
+#ifdef __ANDROID__
+				LogInfo(fmt::format("restore: apply begin (rss {} MB)", GetCurrentRssMB()));
+#endif
 				// everything validated - now apply the snapshot (caller holds the freeze)
 
 				for (const PendingRange& pending : pendingRanges)
@@ -868,6 +1117,9 @@ namespace CafeSaveState
 						in.seekg((std::streamoff)pending.fileOffset, std::ios::beg);
 						if (pending.compressedSize > 0)
 						{
+								SetPhase("apply range base=%08x size=%u comp=%u",
+														(unsigned)pending.baseAddress, (unsigned)pending.size,
+														(unsigned)pending.compressedSize);
 								if (!ReadCompressedRange(in, target->getPtr(), pending.size, pending.compressedSize))
 								{
 										result.errorMessage = fmt::format("Failed to decompress memory range {:08x}", pending.baseAddress);
@@ -886,8 +1138,7 @@ namespace CafeSaveState
 										LogWarning(result.errorMessage);
 										return result;
 								}
-								in.read((char*)target->getPtr(), pending.size);
-								if (!in)
+								if (!ReadRawRange(in, target->getPtr(), pending.size))
 								{
 										result.errorMessage = "Failed to read memory range from state file";
 										LogWarning(result.errorMessage);
@@ -896,6 +1147,9 @@ namespace CafeSaveState
 						}
 				}
 
+#ifdef __ANDROID__
+				LogInfo(fmt::format("restore: apply done (rss {} MB)", GetCurrentRssMB()));
+#endif
 				// restore host-side state
 				sysAreaAllocatorOffset = (MPTR)header.sysAreaAllocatorOffset;
 				iosu::fsa::FSARestoreFileStates(fileStates);
@@ -961,11 +1215,26 @@ namespace CafeSaveState
 
 		OperationResult CaptureStateToFile(uint64 titleId, const std::filesystem::path& filePath)
 		{
-				EmulationFreeze freeze;
-				std::string freezeError;
-				if (!freeze.begin(freezeError))
-					return { false, freezeError };
-				return CaptureStateToFileLocked(titleId, filePath);
+				[[maybe_unused]] SaveStateSignalGuard signalGuard;
+				SetPhase("capture: acquiring freeze (titleId %016llx)", (unsigned long long)titleId);
+				try
+				{
+						EmulationFreeze freeze;
+						std::string freezeError;
+						if (!freeze.begin(freezeError))
+								return { false, freezeError };
+						return CaptureStateToFileLocked(titleId, filePath);
+				}
+				catch (const std::exception& e)
+				{
+						LogWarning(fmt::format("capture threw an exception: {}", e.what()));
+						return { false, fmt::format("Exception during capture: {}", e.what()) };
+				}
+				catch (...)
+				{
+						LogWarning("capture threw an unknown exception");
+						return { false, "Unknown exception during capture" };
+				}
 		}
 
 		OperationResult RestoreStateFromFile(uint64 expectedTitleId, const std::filesystem::path& filePath)
@@ -974,14 +1243,31 @@ namespace CafeSaveState
 				// invalid file never interrupts the running emulation
 				std::error_code ec;
 				if (!std::filesystem::exists(filePath, ec))
-					return { false, "State file does not exist" };
-				EmulationFreeze freeze;
-				std::string freezeError;
-				if (!freeze.begin(freezeError))
+						return { false, "State file does not exist" };
+				// v3.3: mirror progress to logcat and catch any fatal signal / C++
+				// exception with the operation phase attached
+				[[maybe_unused]] SaveStateSignalGuard signalGuard;
+				SetPhase("restore: acquiring freeze (titleId %016llx)", (unsigned long long)expectedTitleId);
+				try
+				{
+						EmulationFreeze freeze;
+						std::string freezeError;
+						if (!freeze.begin(freezeError))
 								return { false, freezeError };
-				auto result = RestoreStateFromFileLocked(expectedTitleId, filePath);
-				if (result.success)
+						auto result = RestoreStateFromFileLocked(expectedTitleId, filePath);
+						if (result.success)
 								freeze.RequestGpuCacheReset();
-				return result;
+						return result;
+				}
+				catch (const std::exception& e)
+				{
+						LogWarning(fmt::format("restore threw an exception: {}", e.what()));
+						return { false, fmt::format("Exception during restore: {}", e.what()) };
+				}
+				catch (...)
+				{
+						LogWarning("restore threw an unknown exception");
+						return { false, "Unknown exception during restore" };
+				}
 		}
 }
