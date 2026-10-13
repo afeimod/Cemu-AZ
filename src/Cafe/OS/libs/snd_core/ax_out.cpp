@@ -4,6 +4,7 @@
 #include "audio/IAudioAPI.h"
 //#include "ax.h"
 #include "config/CemuConfig.h"
+#include <atomic>
 
 namespace snd_core
 {
@@ -394,6 +395,12 @@ namespace snd_core
 
         uint32 numQueuedFramesSndGeneric = 0;
 
+        // grace deadline (steady_clock nanoseconds) after a savestate restore:
+        // the pump skips queueing new frames until it passes so the scheduler,
+        // GPU and JIT can settle into the restored state before the AX IST
+        // thread runs its first post-restore mixer frame. Zero = no grace
+        std::atomic<int64> s_pumpGraceDeadlineNs{ 0 };
+
         void AXOut_init()
         {
 
@@ -489,12 +496,18 @@ namespace snd_core
                 // race these counter resets
                 {
                         std::unique_lock lock(g_audioMutex);
-                        numQueuedFramesSndGeneric = numProcessedFrames;
+                        // restart the frame gate from zero on both counters: aligning
+                        // against the restored numProcessedFrames would preserve the
+                        // pre-restore timeline's counter offsets
+                        numQueuedFramesSndGeneric = 0;
+                        numProcessedFrames = 0;
                         // discard partially accumulated DMA frames so the next block
                         // starts on a fresh group boundary
                         tempAudioBlockCounter = 0;
                         tempDRCAudioBlockCounter = 0;
                 }
+                // hold the pump back briefly after the restore (see s_pumpGraceDeadlineNs)
+                s_pumpGraceDeadlineNs.store(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count() + 50000000ll, std::memory_order_relaxed);
                 // hard restart of all output devices: Stop -> Flush -> Play. This is
                 // intentionally done WITHOUT holding g_audioMutex: cubeb_stream_stop
                 // joins the device callback thread, and blocking on that join while
@@ -565,6 +578,16 @@ namespace snd_core
 
                 if (snd_core::isInitialized())
                 {
+                        // grace window right after a savestate restore: skip queueing new
+                        // frames for a short period so the first mixer frame runs well
+                        // after the scheduler/GPU have settled into the restored state
+                        if (s_pumpGraceDeadlineNs.load(std::memory_order_relaxed) != 0)
+                        {
+                                const auto nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+                                if (nowNs < s_pumpGraceDeadlineNs.load(std::memory_order_relaxed))
+                                        return;
+                                s_pumpGraceDeadlineNs.store(0, std::memory_order_relaxed);
+                        }
                         // signed difference instead of strict equality: a frame restored from a
                         // savestate can make the processed counter briefly run ahead of the queued
                         // counter, which permanently wedged the pump (== never true) and muted all

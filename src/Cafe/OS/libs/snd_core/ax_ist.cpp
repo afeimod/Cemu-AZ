@@ -1052,6 +1052,23 @@ namespace snd_core
 		OSSendMessage(__AXIstThreadMsgQueue.GetPtr(), msg, 0);
 	}
 
+	// savestate restore support: drop all frame messages which the pre-restore
+	// timeline left in the AX IST message queue and clear the mid-frame flag.
+	// The restored queue may contain stale frame messages which would otherwise
+	// make the AX IST thread run mixer frames with outdated timing as its very
+	// first action after emulation resumes. Must be called while the emulated
+	// threads are suspended (restore path, system events paused) - it takes the
+	// scheduler lock internally and must not race the IST thread
+	void AXIst_DrainPendingFrames()
+	{
+		sint32 drainedCount = 0;
+		coreinit::OSMessage* msg = _queueFrameMsg.GetPtr();
+		while (coreinit::OSReceiveMessage(__AXIstThreadMsgQueue.GetPtr(), msg, 0))
+			drainedCount++;
+		__AXIstIsProcessingFrame.store(false);
+		cemuLog_log(LogType::Force, "AX IST drain: dropped {} stale frame message(s)", drainedCount);
+	}
+
 	void AXIst_StopThread()
 	{
 		cemu_assert_debug(coreinit::OSIsThreadTerminated(AXIst_GetThread()) == false);

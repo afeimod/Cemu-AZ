@@ -260,6 +260,7 @@ namespace snd_core
 	void AXIst_Init();
 	void AXIst_ThreadEntry(PPCInterpreter_t* hCPU);
 	void AXIst_QueueFrame();
+	void AXIst_DrainPendingFrames();
 
 	void AXResetCallbacks();
 

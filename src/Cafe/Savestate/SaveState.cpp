@@ -1250,6 +1250,10 @@ namespace CafeSaveState
                                 PPCRecompiler_invalidateRange(0xF6000000, 0xF8000000);
 
                                 LogInfo("restore: scheduler rebuilt + recompiler invalidated");
+                                // drop AX IST frame messages left over from the pre-restore
+                                // timeline while the emulated threads are still suspended -
+                                // the resumed IST thread must not run stale mixer frames
+                                snd_core::AXIst_DrainPendingFrames();
                                 // the host audio output must be reset after an in-place restore:
                                 // stale queued blocks, partially accumulated DMA groups and a
                                 // desynced frame gate would otherwise cause probabilistic silence
