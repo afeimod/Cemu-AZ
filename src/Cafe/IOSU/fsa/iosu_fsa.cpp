@@ -1,4 +1,5 @@
 #include "fsa_types.h"
+#include "Cafe/Savestate/SavestateFnRegistry.h"
 #include "iosu_fsa.h"
 #include "Cafe/IOSU/kernel/iosu_kernel.h"
 #include "Cafe/Filesystem/fsc.h"
@@ -1032,4 +1033,9 @@ namespace iosu
 			sFSAIoThread.join();
 		}
 	} // namespace fsa
+	// v3.7: register FSA IO functions for the crash reporter
+	SAVESTATE_REGISTER_FN(iosu::fsa::FSAIoThread)
+	SAVESTATE_REGISTER_FN(iosu::fsa::FSAHandleCommandIoctl)
+	SAVESTATE_REGISTER_FN(iosu::fsa::FSAHandleCommandIoctlv)
+
 } // namespace iosu

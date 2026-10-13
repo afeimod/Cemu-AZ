@@ -38,7 +38,9 @@
 #include <unwind.h>
 #include <dlfcn.h>
 #include <sys/prctl.h>
+#include <ucontext.h>
 #endif
+#include "Cafe/Savestate/SavestateFnRegistry.h"
 
 namespace fs = std::filesystem;
 
@@ -113,36 +115,99 @@ namespace
                                 va_end(args);
                                 g_saveStatePhase.store(g_phaseText, std::memory_order_release);
                 }
-                // async-signal-safe enough for a crash reporter: logcat write + re-raise so
+                                // async-signal-safe enough for a crash reporter: logcat write + re-raise so
                 // the system still generates the regular tombstone
-                void SaveStateFatalSignalHandler(int sig, siginfo_t* info, void*)
+                // v3.7: module base captured when the reporter is armed, used to print
+                // module-relative PCs which stay comparable across runs despite ASLR
+                void* g_moduleBaseForSymbols = nullptr;
+                
+                void SaveStateFatalSignalHandler(int sig, siginfo_t* info, void* uctx)
                 {
                                 char threadName[16] = { 0 };
                                 prctl(PR_GET_NAME, threadName);
                                 __android_log_print(ANDROID_LOG_ERROR, "CemuSaveState",
-                                                                                "!!! FATAL SIGNAL %d (fault addr %p) on thread '%s' during: %s", sig,
-                                                                                info ? info->si_addr : nullptr, threadName,
-                                                                                g_saveStatePhase.load(std::memory_order_seq_cst));
-                                // v3.4: native backtrace PCs (module base is logged when the
-                                // reporter is armed). The re-raise below still produces the
-                                // regular system tombstone for full symbolication
+                                                                "!!! FATAL SIGNAL %d (fault addr %p) on thread '%s' during: %s", sig,
+                                                                info ? info->si_addr : nullptr, threadName,
+                                                                g_saveStatePhase.load(std::memory_order_seq_cst));
+                                // v3.7: the generic unwinder cannot reliably cross the signal trampoline
+                                // (it produced phantom system frames in earlier logs), so the interrupted
+                                // PC/LR/SP and the general purpose registers are taken directly from the
+                                // kernel-provided ucontext
+                                uint64 pcAbs = 0, lrAbs = 0, spAbs = 0;
+                                const ucontext_t* uc = (const ucontext_t*)uctx;
+                                #if defined(__aarch64__)
+                                if (uc)
+                                {
+                                    pcAbs = (uint64)uc->uc_mcontext.pc;
+                                    lrAbs = (uint64)uc->uc_mcontext.regs[30];
+                                    spAbs = (uint64)uc->uc_mcontext.sp;
+                                }
+                                #endif
+                                const uint64 symBase = (uint64)(uintptr_t)g_moduleBaseForSymbols;
+                                // offsets above this are by definition other mappings (the emulator module
+                                // is a few dozen MB) - they get no registry lookup
+                                constexpr uint64 kModuleOffsetCap = 0x20000000ULL;
+                                auto relOf = [symBase](uint64 addr) -> long long
+                                {
+                                    return (symBase != 0 && addr >= symBase) ? (long long)(addr - symBase) : -1LL;
+                                };
+                                __android_log_print(ANDROID_LOG_ERROR, "CemuSaveState",
+                                                    "fault pc %p (lib+%llx) lr %p (lib+%llx) sp %p",
+                                                    (void*)pcAbs, (unsigned long long)relOf(pcAbs),
+                                                    (void*)lrAbs, (unsigned long long)relOf(lrAbs), (void*)spAbs);
+                                if (pcAbs >= symBase && symBase != 0 && (pcAbs - symBase) < kModuleOffsetCap)
+                                {
+                                    uint64 fnDelta = 0;
+                                    const char* fnName = savestate_fsym::FindNearest(pcAbs - symBase, symBase, fnDelta);
+                                    __android_log_print(ANDROID_LOG_ERROR, "CemuSaveState", "fault pc in function: %s+%llu",
+                                                        fnName ? fnName : "<not registered>", (unsigned long long)fnDelta);
+                                }
+                                #if defined(__aarch64__)
+                                if (uc)
+                                {
+                                    for (int regBase = 0; regBase < 31; regBase += 6)
+                                    {
+                                        char line[320];
+                                        size_t len = 0;
+                                        line[0] = '\0';
+                                        for (int j = 0; j < 6 && (regBase + j) < 31; ++j)
+                                        {
+                                            len += (size_t)snprintf(line + len, sizeof(line) - len, "x%d=%llx ",
+                                                    regBase + j, (unsigned long long)uc->uc_mcontext.regs[regBase + j]);
+                                        }
+                                        __android_log_print(ANDROID_LOG_ERROR, "CemuSaveState", "regs: %s", line);
+                                    }
+                                }
+                                #endif
                                 struct BacktraceCtx
                                 {
-                                        void* pcs[24];
-                                        uint32 count;
+                                    void* pcs[24];
+                                    uint32 count;
                                 };
                                 BacktraceCtx bt{};
                                 _Unwind_Backtrace(
-                                        [](struct _Unwind_Context* ctx, void* user) -> _Unwind_Reason_Code
-                                        {
-                                                BacktraceCtx* bt = (BacktraceCtx*)user;
-                                                if (bt->count < sizeof(bt->pcs) / sizeof(bt->pcs[0]))
-                                                        bt->pcs[bt->count++] = (void*)_Unwind_GetIP(ctx);
-                                                return _URC_NO_REASON;
-                                        },
-                                        &bt);
+                                    [](struct _Unwind_Context* ctx, void* user) -> _Unwind_Reason_Code
+                                    {
+                                        BacktraceCtx* bt = (BacktraceCtx*)user;
+                                        if (bt->count < sizeof(bt->pcs) / sizeof(bt->pcs[0]))
+                                            bt->pcs[bt->count++] = (void*)_Unwind_GetIP(ctx);
+                                        return _URC_NO_REASON;
+                                    },
+                                    &bt);
                                 for (uint32 i = 0; i < bt.count; ++i)
-                                        __android_log_print(ANDROID_LOG_ERROR, "CemuSaveState", "bt #%u pc %p", i, bt.pcs[i]);
+                                {
+                                    const uint64 pc = (uint64)(uintptr_t)bt.pcs[i];
+                                    if (pc >= symBase && symBase != 0 && (pc - symBase) < kModuleOffsetCap)
+                                    {
+                                        uint64 fnDelta = 0;
+                                        const char* fnName = savestate_fsym::FindNearest(pc - symBase, symBase, fnDelta);
+                                        __android_log_print(ANDROID_LOG_ERROR, "CemuSaveState", "bt #%u pc %p lib+%llx in %s+%llu",
+                                                            i, bt.pcs[i], (unsigned long long)(pc - symBase),
+                                                            fnName ? fnName : "<not registered>", (unsigned long long)fnDelta);
+                                    }
+                                    else
+                                        __android_log_print(ANDROID_LOG_ERROR, "CemuSaveState", "bt #%u pc %p (outside module)", i, bt.pcs[i]);
+                                }
                                 signal(sig, SIG_DFL);
                                 raise(sig);
                 }
@@ -1328,4 +1393,8 @@ namespace CafeSaveState
                                                 return { false, "Unknown exception during restore" };
                                 }
                 }
+
+// v3.7: register savestate functions for the crash reporter
+SAVESTATE_REGISTER_FN(RestoreStateFromFileLocked)
+SAVESTATE_REGISTER_FN(CaptureStateToFile)
 }

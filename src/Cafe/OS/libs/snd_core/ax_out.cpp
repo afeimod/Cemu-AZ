@@ -1,4 +1,5 @@
 #include "Cafe/OS/libs/snd_core/ax.h"
+#include "Cafe/Savestate/SavestateFnRegistry.h"
 #include "Cafe/OS/libs/snd_core/ax_internal.h"
 #include "Cafe/HW/MMU/MMU.h"
 #include "audio/IAudioAPI.h"
@@ -601,4 +602,10 @@ namespace snd_core
                 }
         }
 
+
+        // v3.7: register AX output functions for the crash reporter
+        SAVESTATE_REGISTER_FN(AXOut_update)
+        SAVESTATE_REGISTER_FN(AXOut_ResetAfterRestore)
+        SAVESTATE_REGISTER_FN(AXOut_SubmitTVFrame)
+        SAVESTATE_REGISTER_FN(AXOut_SubmitDRCFrame)
 }

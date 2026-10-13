@@ -1,4 +1,5 @@
 #include "Cafe/OS/libs/snd_core/ax.h"
+#include "Cafe/Savestate/SavestateFnRegistry.h"
 #include "Cafe/OS/libs/snd_core/ax_internal.h"
 #include "Cafe/HW/Espresso/PPCState.h"
 #include "Cafe/HW/Espresso/PPCCallback.h"
@@ -1087,4 +1088,10 @@ namespace snd_core
 	{
 		return __AXIstIsProcessingFrame.load();
 	}
+
+        // v3.7: register AX IST functions for the crash reporter
+        SAVESTATE_REGISTER_FN(AXIst_GenerateFrame)
+        SAVESTATE_REGISTER_FN(AXIst_ThreadEntry)
+        SAVESTATE_REGISTER_FN(AXIst_QueueFrame)
+        SAVESTATE_REGISTER_FN(AXIst_DrainPendingFrames)
 }
