@@ -55,6 +55,13 @@ public:
 		m_count = 0;
 	}
 
+	// v3.9: raw counter value for the savestate scheduler audit (read-only)
+	uint64 getCount()
+	{
+		std::lock_guard lock(m_mutex);
+		return m_count;
+	}
+
 	void increment()
 	{
 		std::lock_guard lock(m_mutex);

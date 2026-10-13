@@ -629,6 +629,9 @@ namespace coreinit
 	// v3.8: savestate freeze gate - while set the scheduler never starts
 	// emulated threads (see coreinit_Thread.cpp)
 	void SavestateSetSchedulerHold(bool hold);
+	// v3.9: log-only audit of the scheduler state after a savestate restore
+	// (missing host fibers, run queue inconsistencies). See coreinit_Thread.cpp
+	void SavestateLogSchedulerInvariants();
 	bool OSIsSchedulerActive();
 
 	// internal

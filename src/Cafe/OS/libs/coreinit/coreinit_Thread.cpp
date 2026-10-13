@@ -12,6 +12,10 @@
 
 #include "util/helpers/Semaphore.h"
 #include "util/helpers/ConcurrentQueue.h"
+#include <unordered_set>
+#ifdef __ANDROID__
+#include <android/log.h>
+#endif
 #include "util/Fiber/Fiber.h"
 
 #include "util/helpers/helpers.h"
@@ -263,6 +267,80 @@ namespace coreinit
 
 		__OSUnlockScheduler();
 	}
+
+	// v3.9: audit the scheduler state after a savestate restore, before any
+	// emulated thread can be scheduled again. Logs (never asserts) every
+	// condition that would crash or hang the scheduler once emulation resumes:
+	//  - an active thread without a host fiber (scheduling it would make
+	//    __OSSwitchToThreadFiber dereference a missing s_threadToFiber entry)
+	//  - a READY thread that is linked into no run queue (it would never run)
+	//  - a suspended or non-ready thread still linked into a run queue
+	//  - a run queue whose semaphore count disagrees with its content, or a
+	//    broken / duplicated queue chain
+	void SavestateLogSchedulerInvariants()
+	{
+		auto logLine = [](std::string_view msg)
+		{
+			cemuLog_log(LogType::Force, "[SaveState] {}", msg);
+			#ifdef __ANDROID__
+			__android_log_print(ANDROID_LOG_INFO, "CemuSaveState", "%s", std::string(msg).c_str());
+			#endif
+		};
+		__OSLockScheduler();
+		// every active thread must own a host fiber, otherwise the first
+		// scheduling attempt dereferences a missing map entry
+		for (sint32 i = 0; i < activeThreadCount; i++)
+		{
+			auto* thread = reinterpret_cast<OSThread_t*>(memory_getPointerFromVirtualOffset(activeThread[i]));
+			if (s_threadToFiber.find(thread) == s_threadToFiber.end())
+				logLine(fmt::format("audit: active thread {:08x} has no host fiber", (unsigned)activeThread[i]));
+		}
+		// run queues: chain integrity, duplicate entries, state/suspend
+		// consistency and semaphore count agreement
+		for (sint32 coreIndex = 0; coreIndex < PPC_CORE_COUNT; coreIndex++)
+		{
+			OSThreadQueue* runQueue = g_coreRunQueue.GetPtr() + coreIndex;
+			std::unordered_set<OSThread_t*> seen;
+			uint32 queueLength = 0;
+			OSThread_t* threadItr = runQueue->head.GetPtr();
+			while (threadItr && queueLength < 1024)
+			{
+				if (!seen.insert(threadItr).second)
+				{
+					logLine(fmt::format("audit: run queue {} contains thread {:08x} twice (chain loop)", (int)coreIndex, (unsigned)memory_getVirtualOffsetFromPointer(threadItr)));
+					break;
+				}
+				queueLength++;
+				if (threadItr->state != OSThread_t::THREAD_STATE::STATE_READY)
+					logLine(fmt::format("audit: run queue {} holds non-ready thread {:08x} (state {})", (int)coreIndex, (unsigned)memory_getVirtualOffsetFromPointer(threadItr), (int)threadItr->state));
+				else if (threadItr->suspendCounter != 0)
+					logLine(fmt::format("audit: run queue {} holds suspended thread {:08x} (suspend {})", (int)coreIndex, (unsigned)memory_getVirtualOffsetFromPointer(threadItr), (int)threadItr->suspendCounter));
+				threadItr = threadItr->linkRun[coreIndex].next.GetPtr();
+			}
+			const uint64 semaphoreCount = g_coreRunQueueThreadCount[coreIndex].getCount();
+			if (semaphoreCount != (uint64)queueLength)
+				logLine(fmt::format("audit: run queue {} count mismatch (semaphore {} vs chain {})", (int)coreIndex, (unsigned long long)semaphoreCount, (unsigned)queueLength));
+			const bool tailConsistent = (runQueue->head.IsNull() && runQueue->tail.IsNull()) || (!runQueue->head.IsNull() && !runQueue->tail.IsNull());
+			if (!tailConsistent)
+				logLine(fmt::format("audit: run queue {} head/tail inconsistent", (int)coreIndex));
+		}
+		// schedulable threads must be linked into at least one run queue,
+		// otherwise they silently never run (hang) after the restore
+		for (sint32 i = 0; i < activeThreadCount; i++)
+		{
+			auto* thread = reinterpret_cast<OSThread_t*>(memory_getPointerFromVirtualOffset(activeThread[i]));
+			if (thread->state != OSThread_t::THREAD_STATE::STATE_READY || thread->suspendCounter != 0)
+				continue;
+			bool inAnyQueue = false;
+			for (sint32 c = 0; c < PPC_CORE_COUNT && !inAnyQueue; c++)
+				inAnyQueue = thread->currentRunQueue[c] != nullptr;
+			if (!inAnyQueue)
+				logLine(fmt::format("audit: READY thread {:08x} is in no run queue (would never run)", (unsigned)activeThread[i]));
+		}
+		__OSUnlockScheduler();
+		logLine("audit: scheduler invariants checked");
+	}
+
 
 
 

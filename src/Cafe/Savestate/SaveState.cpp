@@ -70,6 +70,19 @@ namespace
                 constexpr uint32 kFsaIdleTimeoutMs = 5000;
                 constexpr uint32 kSettleWindowMs = 100;
 
+                // v3.9: process-global freeze serialization. EmulationFreeze objects are
+                // per-call locals, so the m_active member cannot detect overlapping
+                // operations. Two concurrent freezes (a quick save fired while a quick
+                // load is still running, a double tap on the load button, ...) would
+                // interleave their pause/suspend cycles and their memory accesses and
+                // corrupt the emulated state - which then crashes the scheduler when
+                // emulation resumes. Serialize all capture/restore operations process
+                // wide: an overlapping operation now fails cleanly with an error
+                std::atomic<uint32> sFreezeOperationActive{ 0 };
+                // v3.9: running index of freeze cycles, included in every freeze log
+                // line so a crash on the Nth restore is immediately visible in logcat
+                std::atomic<uint32> sFreezeCycleCounter{ 0 };
+
                 struct SaveStateHeader
                 {
                                 uint32 magic;
@@ -791,6 +804,24 @@ namespace CafeSaveState
                                                 return false;
                                 }
 
+                                // v3.9: process-wide serialization (see sFreezeOperationActive).
+                                // the slot is released by end(), which always runs via the
+                                // destructor even when begin() fails further down
+                                {
+                                                uint32 expected = 0;
+                                                if (!sFreezeOperationActive.compare_exchange_strong(expected, 1))
+                                                {
+                                                                errorOut = "Another save/load operation is already running";
+                                                                LogWarning(fmt::format("freeze: rejected, another capture/restore is already active (cycle #{})", sFreezeCycleCounter.load(std::memory_order_relaxed)));
+                                                                return false;
+                                                }
+                                                m_slotHeld = true;
+                                }
+                                const uint32 freezeCycle = sFreezeCycleCounter.fetch_add(1, std::memory_order_relaxed) + 1;
+                                #ifdef __ANDROID__
+                                LogInfo(fmt::format("freeze cycle #{}: begin (rss {} MB)", freezeCycle, GetCurrentRssMB()));
+                                #endif
+
                                 const auto freezeStart = std::chrono::steady_clock::now();
                                 auto elapsedMs = [&freezeStart]() { return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - freezeStart).count(); };
                                 m_wasPaused = CafeSystem::IsTitlePaused();
@@ -822,7 +853,7 @@ namespace CafeSaveState
                                                 return false;
                                 }
 
-                                LogInfo(fmt::format("freeze: threads idle ({} ms)", elapsedMs()));
+                                LogInfo(fmt::format("freeze cycle #{}: threads idle ({} ms)", freezeCycle, elapsedMs()));
                                 // v3.8: from this point no emulated thread may be scheduled until the
                                 // freeze is fully released. The scheduler rebuild during a restore
                                 // re-adds ready threads to the run queues, which would otherwise let
@@ -836,8 +867,24 @@ namespace CafeSaveState
                                 // or corrupted save files after an in-place restore)
                                 SetPhase("freeze: engaging FSA gate");
                                 iosu::fsa::SavestateSetFrozen(true);
+                                // v3.9: a request still being processed means the FSA IO thread
+                                // is copying data in or out of emulated buffers right now.
+                                // Overwriting (restore) or reading (capture) that memory while
+                                // the copy is in flight tears the state and crashes later.
+                                // Abort the operation instead of proceeding - the caller gets a
+                                // clean error and the game keeps running
                                 if (!iosu::fsa::SavestateWaitIdle(kFsaIdleTimeoutMs))
-                                                LogWarning("FSA IO thread did not become idle in time - continuing");
+                                {
+                                                errorOut = "FSA IO thread did not become idle in time";
+                                                LogWarning(fmt::format("freeze cycle #{}: FSA IO thread still busy after {} ms - aborting", freezeCycle, elapsedMs()));
+                                                if (m_pausedByUs)
+                                                {
+                                                                CafeSystem::ResumeTitle();
+                                                                m_pausedByUs = false;
+                                                }
+                                                return false;
+                                }
+                                LogInfo(fmt::format("freeze cycle #{}: fsa gate idle ({} ms)", freezeCycle, elapsedMs()));
                                 // drain the command ring before pausing the vsync timing - a GPU thread
                                 // blocked in a flip wait needs the vsync counter to keep advancing
                                 SetPhase("freeze: waiting for gpu idle");
@@ -887,6 +934,21 @@ namespace CafeSaveState
                                                 if (IsAtSafeGpuPoint())
                                                         break;
                                                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                                        }
+                                        // v3.9: if the boundary is not reached, log the actual GPU
+                                        // state. A persistent flipRequest != flipExecute desync (e.g.
+                                        // left behind by a previous restore) would make every later
+                                        // freeze wait the full 400 ms and then restore mid-flip
+                                        if (!IsAtSafeGpuPoint())
+                                        {
+                                                        uint32 flipReq = 0, flipExec = 0;
+                                                        if (LatteGPUState.sharedArea)
+                                                        {
+                                                                        flipReq = _swapEndianU32(LatteGPUState.sharedArea->flipRequestCountBE);
+                                                                        flipExec = _swapEndianU32(LatteGPUState.sharedArea->flipExecuteCountBE);
+                                                        }
+                                                        LogWarning(fmt::format("freeze cycle #{}: frame boundary not reached in 400 ms (gpuIdle={} flipReq={} flipExec={})",
+                                                                        freezeCycle, TCL::IsGpuIdle(), (unsigned)flipReq, (unsigned)flipExec));
                                         }
                                 }
                                 // stop the virtual vsync timer and the OS system events (AX/alarm/NFP)
@@ -960,6 +1022,14 @@ namespace CafeSaveState
                                 // fault (stable rss + FATAL SIGNAL line) from a memory-pressure kill
                                 // (climbing rss, process simply dies without any signal)
                                 SetPhase("running: post-restore emulation (title resumed)");
+                                // v3.9: release the process-wide freeze slot as the very last
+                                // step so overlapping operations stay rejected until emulation
+                                // has fully resumed
+                                if (m_slotHeld)
+                                {
+                                                m_slotHeld = false;
+                                                sFreezeOperationActive.store(0, std::memory_order_release);
+                                }
                                 #ifdef __ANDROID__
                                 // v3.4: sample the resident footprint after the operation ends
                                 std::thread([]() {
@@ -1453,6 +1523,12 @@ namespace CafeSaveState
 
                                 // rebuild the host scheduler state from the restored emulated memory
                                 coreinit::SavestateRebuildSchedulerAfterRestore();
+                                // v3.9: audit the rebuilt scheduler before anything is scheduled.
+                                // A thread that is schedulable but has no host fiber (or a run
+                                // queue whose semaphore count disagrees with its content) would
+                                // crash the scheduler thread the moment emulation resumes - this
+                                // makes such a state visible in the log BEFORE the crash
+                                coreinit::SavestateLogSchedulerInvariants();
 
                                 // the restored memory may contain different code than the currently
                                 // JIT-compiled fragments (self-modifying code), so drop everything

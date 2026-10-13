@@ -58,6 +58,10 @@ namespace CafeSaveState
 		bool m_pausedByUs{ false };
 		bool m_wasPaused{ false };
 		bool m_resetGpuCaches{ false };
+		// v3.9: true while this instance owns the process-wide freeze slot
+		// (released in end(), which runs from the destructor even when begin()
+		// failed midway)
+		bool m_slotHeld{ false };
 	};
 
 	// Captures the current emulation state into a single file (written via a
