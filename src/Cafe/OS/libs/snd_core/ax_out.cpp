@@ -399,7 +399,7 @@ namespace snd_core
         // the pump skips queueing new frames until it passes so the scheduler,
         // GPU and JIT can settle into the restored state before the AX IST
         // thread runs its first post-restore mixer frame. Zero = no grace
-        std::atomic<int64> s_pumpGraceDeadlineNs{ 0 };
+        std::atomic<sint64> s_pumpGraceDeadlineNs{ 0 };
 
         void AXOut_init()
         {
