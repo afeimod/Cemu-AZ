@@ -312,7 +312,7 @@ namespace coreinit
 				}
 				queueLength++;
 				if (threadItr->state != OSThread_t::THREAD_STATE::STATE_READY)
-					logLine(fmt::format("audit: run queue {} holds non-ready thread {:08x} (state {})", (int)coreIndex, (unsigned)memory_getVirtualOffsetFromPointer(threadItr), (int)threadItr->state));
+					logLine(fmt::format("audit: run queue {} holds non-ready thread {:08x} (state {})", (int)coreIndex, (unsigned)memory_getVirtualOffsetFromPointer(threadItr), (int)threadItr->state.value()));
 				else if (threadItr->suspendCounter != 0)
 					logLine(fmt::format("audit: run queue {} holds suspended thread {:08x} (suspend {})", (int)coreIndex, (unsigned)memory_getVirtualOffsetFromPointer(threadItr), (int)threadItr->suspendCounter));
 				threadItr = threadItr->linkRun[coreIndex].next.GetPtr();
